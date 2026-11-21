@@ -10,6 +10,7 @@ export interface LiveChannelRef {
   inputId: string;
   displayName: string;
   displayNumber: string;
+  internalProviderId?: string;
 }
 
 export interface GuideChannelIdentity {
@@ -26,6 +27,12 @@ function normalize(value: string): string {
   normalized = normalized.replace(/^\*/, '').trim();
   normalized = normalized.replace(/\s+/g, ' ');
   return normalized;
+}
+
+function normalizeChannelId(value: string | null | undefined): string {
+  return typeof value === 'string'
+    ? normalize(value.replace(/^xmltv:/i, ''))
+    : '';
 }
 
 function namesMatch(left: string, right: string): boolean {
@@ -85,6 +92,20 @@ export function parsePlaylistIdentities(m3u: string): PlaylistIdentity[] {
   return identities;
 }
 
+export function parsePlaylistEpgUrl(m3u: string): string | null {
+  const firstLine = m3u.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  if (!/^#EXTM3U\b/i.test(firstLine)) {
+    return null;
+  }
+  const attributes = playlistAttributes(firstLine);
+  const detected =
+    attributes['url-tvg'] ||
+    attributes['x-tvg-url'] ||
+    attributes['tvg-url'] ||
+    '';
+  return detected !== '' ? detected : null;
+}
+
 export function matchLiveChannel(
   guide: GuideChannelIdentity,
   playlist: PlaylistIdentity[],
@@ -97,12 +118,23 @@ export function matchLiveChannel(
     return null;
   }
 
-  const guideId = normalize(guide.id.replace(/^xmltv:/, ''));
-  const playlistMatch = playlist.find(identity =>
+  const guideId = normalizeChannelId(guide.id);
+  const playlistMatches = playlist.filter(identity =>
+    guideId !== '' &&
     identity.tvgId !== undefined &&
-    normalize(identity.tvgId.replace(/^xmltv:/, '')) === guideId,
+    normalizeChannelId(identity.tvgId) === guideId,
   );
-  if (playlistMatch !== undefined) {
+
+  const providerIdMatch = liveRows.find(channel =>
+    guideId !== '' &&
+    channel.internalProviderId !== undefined &&
+    normalizeChannelId(channel.internalProviderId) === guideId,
+  );
+  if (providerIdMatch !== undefined) {
+    return providerIdMatch;
+  }
+
+  for (const playlistMatch of playlistMatches) {
     for (const liveChannel of liveRows) {
       if (
         namesMatch(liveChannel.displayName, playlistMatch.title) ||
@@ -112,14 +144,15 @@ export function matchLiveChannel(
         return liveChannel;
       }
     }
-    if (playlistMatch.tvgChno !== undefined) {
-      const chno = playlistMatch.tvgChno.trim();
-      const hit = liveRows.find(channel =>
-        channel.displayNumber.trim() === chno,
-      );
-      if (hit !== undefined) {
-        return hit;
-      }
+  }
+  for (const playlistMatch of playlistMatches) {
+    if (playlistMatch.tvgChno === undefined) {
+      continue;
+    }
+    const chno = playlistMatch.tvgChno.trim();
+    const hit = liveRows.find(channel => channel.displayNumber.trim() === chno);
+    if (hit !== undefined) {
+      return hit;
     }
   }
 
@@ -130,7 +163,7 @@ export function matchLiveChannel(
   }
 
   const serviceNumber = guide.serviceNumber ?? guide.number;
-  const tailMatch = guide.id.match(/(\d+)$/);
+  const tailMatch = typeof guide.id === 'string' ? guide.id.match(/(\d+)$/) : null;
   const threeDigitTail =
     tailMatch && tailMatch[1].length >= 3
       ? tailMatch[1].slice(-3)

@@ -26,7 +26,7 @@ export function copy(language: UiLanguage) {
       BS4K: 'BS4K',
     },
     load: english ? 'Load' : '読込',
-    emptyTitle: english ? 'Programme guide' : '番組表',
+    emptyTitle: english ? 'Program guide' : '番組表',
     emptyBody: english
       ? 'An XMLTV file with KonomiTV channel ids fills the grid. The EPG address is kept for the next launch. The M3U / M3U8 playlist matches TVirl channels in Live Channels and is not played by this app.'
       : 'KonomiTV と同じチャンネル ID の XMLTV を読み込むと、時間は左右、放送局は横、番組は縦に並びます。指定した EPG は次回の起動でも使われます。M3U / M3U8 はこのアプリでは再生せず、Live Channels の TVirl チャンネルとの照合に使います。',
@@ -49,15 +49,31 @@ export function copy(language: UiLanguage) {
     hourSuffix: english ? '' : '時',
     noProgramme: english ? 'No programme' : '番組なし',
     selectProgramme: english ? 'Select a programme' : '番組を選択',
+    close: english ? 'Close' : '閉じる',
+    settings: english ? 'Settings' : '設定',
+    settingsAccessibility: 'Open settings',
+    focusCursor: english ? 'Wii-style focus cursor' : 'Wii風フォーカスカーソル',
+    focusCursorHint: english
+      ? 'Show a large hand over the focused item'
+      : 'フォーカス中の項目に大きな手を表示',
+    livePreview: english ? 'Live preview' : 'ライブプレビュー',
+    livePreviewHint: english
+      ? 'Show the TVirl channel preview'
+      : 'TVirl チャンネルのプレビューを表示',
+    settingSaveFailure: english
+      ? 'The setting could not be saved.'
+      : '設定を保存できませんでした。',
+    epgLabel: 'EPG',
+    playlistLabel: 'IPTV',
+    save: english ? 'Save' : '保存',
     languageControl: english ? '日本語' : 'EN',
     languageControlAccessibility: 'Language',
     loadAccessibility: 'Load guide',
     playlistAccessibility: 'IPTV playlist',
     showLaterDaysAccessibility: 'Show later days',
-    playlistError:
-      english
-        ? 'playlist must be an .m3u or .m3u8 file'
-        : 'Playlist must be an .m3u or .m3u8 file.',
+    playlistError: english
+      ? 'playlist must be an .m3u or .m3u8 file'
+      : 'Playlist must be an .m3u or .m3u8 file.',
     xmltvUrlNotSet: english
       ? 'XMLTV URL is not set'
       : 'XMLTV URL が設定されていません。',
@@ -71,7 +87,24 @@ export function copy(language: UiLanguage) {
       ? 'XMLTV has no programmes'
       : 'XMLTV に番組情報がありません。',
     noProgramTitle: english ? 'No program information' : '番組情報なし',
-    saveFailure:
-      'EPG loaded, but it could not be saved for the next launch.',
+    saveFailure: 'EPG loaded, but it could not be saved for the next launch.',
+    translationProgress: (count: number) =>
+      english
+        ? `Translating ${count} EPG text items...`
+        : `EPG のテキスト ${count} 件を翻訳しています...`,
+    translationComplete: (count: number) =>
+      english
+        ? `Translated ${count} EPG text items.`
+        : `EPG のテキスト ${count} 件を翻訳しました。`,
+    translationNotNeeded: english
+      ? 'No Japanese EPG text needed translation.'
+      : '翻訳が必要な日本語の番組情報はありません。',
+    translationFailure: (count: number) =>
+      english
+        ? `Translation failed for ${count} EPG text items; original text is shown.`
+        : `EPG のテキスト ${count} 件を翻訳できませんでした。元の言語で表示します。`,
+    translationFailed: english
+      ? 'EPG translation could not be completed; original text is shown.'
+      : 'EPG の翻訳を完了できませんでした。元の言語で表示します。',
   } as const;
 }

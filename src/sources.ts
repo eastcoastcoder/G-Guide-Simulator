@@ -14,6 +14,8 @@ export interface GuideSources {
 }
 
 export const SOURCES_STORAGE_KEY = 'g-guide.sources';
+export const FOCUS_CURSOR_STORAGE_KEY = 'g-guide.focus-cursor';
+export const LIVE_PREVIEW_STORAGE_KEY = 'g-guide.live-preview';
 export const GUIDE_STORAGE: AsyncStorage = createAsyncStorage('g-guide');
 
 export const EMPTY_SOURCES: GuideSources = {
@@ -66,6 +68,30 @@ export async function saveSources(sources: GuideSources): Promise<void> {
       sources.language === 'English' ? 'English' : 'Japanese',
   };
   await GUIDE_STORAGE.setItem(SOURCES_STORAGE_KEY, JSON.stringify(next));
+}
+
+export async function loadFocusCursorEnabled(): Promise<boolean> {
+  try {
+    return (await GUIDE_STORAGE.getItem(FOCUS_CURSOR_STORAGE_KEY)) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export async function saveFocusCursorEnabled(enabled: boolean): Promise<void> {
+  await GUIDE_STORAGE.setItem(FOCUS_CURSOR_STORAGE_KEY, String(enabled));
+}
+
+export async function loadLivePreviewEnabled(): Promise<boolean> {
+  try {
+    return (await GUIDE_STORAGE.getItem(LIVE_PREVIEW_STORAGE_KEY)) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export async function saveLivePreviewEnabled(enabled: boolean): Promise<void> {
+  await GUIDE_STORAGE.setItem(LIVE_PREVIEW_STORAGE_KEY, String(enabled));
 }
 
 function playlistPath(value: string): string {

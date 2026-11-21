@@ -53,18 +53,19 @@ const parser = new XMLParser({
     name === 'category',
 });
 
+export type EnglishTranslator = (
+  texts: readonly string[],
+) => Promise<{
+  translations: ReadonlyMap<string, string>;
+  failedCount: number;
+}>;
 
 export function parseXmltv(
   xml: string,
   language: GuideLanguage = 'Japanese',
+  translations: ReadonlyMap<string, string> = new Map(),
 ): XmltvGuide {
-  let document: Record<string, unknown>;
-  try {
-    document = parser.parse(xml.replace(/^\uFEFF/, '')) as Record<string, unknown>;
-  } catch {
-    throw new Error('XMLTV document is not valid XML.');
-  }
-
+  const document = parseDocument(xml);
   const tv = document.tv;
   if (tv === undefined || tv === null || typeof tv !== 'object') {
     throw new Error('XMLTV document does not contain programmes.');
@@ -82,7 +83,7 @@ export function parseXmltv(
     if (channelId === '' || channelsById.has(channelId)) {
       continue;
     }
-    const name = childText(element, 'display-name', language);
+    const name = childText(element, 'display-name', language, translations);
     channelsById.set(channelId, {
       name: name !== '' ? name : channelId,
       programs: [],
@@ -116,14 +117,14 @@ export function parseXmltv(
     }
 
     programIndex += 1;
-    const title = childText(element, 'title', language);
-    const description = childText(element, 'desc', language);
+    const title = childText(element, 'title', language, translations);
+    const description = childText(element, 'desc', language, translations);
     channel.programs.push({
       id: `xmltv-${programIndex}`,
       channelId: `xmltv:${channelId}`,
       title: title !== '' ? title : emptyTitle(language),
       description,
-      genre: childText(element, 'category', language),
+      genre: childText(element, 'category', language, translations),
       startMs,
       endMs,
     });
@@ -177,6 +178,8 @@ export async function fetchXmltvGuide(
   language: GuideLanguage = 'Japanese',
   onXml?: (xml: string) => void,
   onServerTime?: (serverTimeMs: number) => void,
+  translator?: EnglishTranslator,
+  onTranslationFailure?: (failedCount: number) => void,
 ): Promise<XmltvGuide> {
   if (url.trim() === '') {
     throw new Error('XMLTV EPG URL is not set.');
@@ -194,7 +197,33 @@ export async function fetchXmltvGuide(
   }
   const xml = await response.text();
   onXml?.(xml);
-  return parseXmltv(xml, language);
+  return parseXmltvForLanguage(
+    xml,
+    language,
+    translator,
+    onTranslationFailure,
+  );
+}
+
+export async function parseXmltvForLanguage(
+  xml: string,
+  language: GuideLanguage,
+  translator?: EnglishTranslator,
+  onTranslationFailure?: (failedCount: number) => void,
+): Promise<XmltvGuide> {
+  if (language !== 'English' || translator === undefined) {
+    return parseXmltv(xml, language);
+  }
+
+  const texts = collectEnglishFallbacks(parseDocument(xml));
+  if (texts.length === 0) {
+    return parseXmltv(xml, language);
+  }
+  const result = await translator(texts);
+  if (result.failedCount > 0) {
+    onTranslationFailure?.(result.failedCount);
+  }
+  return parseXmltv(xml, language, result.translations);
 }
 
 /**
@@ -270,6 +299,7 @@ function childText(
   parent: Record<string, unknown>,
   tagName: string,
   language: GuideLanguage,
+  translations: ReadonlyMap<string, string>,
 ): string {
   const preferred =
     language === 'English' ? ['en', 'eng'] : ['ja', 'jp', 'jpn'];
@@ -295,10 +325,51 @@ function childText(
       return text;
     }
   }
-  if (fallbackWithoutLang !== '') {
-    return fallbackWithoutLang;
+  const fallback = fallbackWithoutLang !== '' ? fallbackWithoutLang : fallbackFirst;
+  return language === 'English'
+    ? translations.get(fallback) ?? fallback
+    : fallback;
+}
+
+function collectEnglishFallbacks(document: Record<string, unknown>): string[] {
+  const tv = document.tv;
+  if (!isRecord(tv)) {
+    throw new Error('XMLTV document does not contain programmes.');
   }
-  return fallbackFirst;
+  const candidates = new Set<string>();
+  for (const element of asArray(tv.channel)) {
+    if (!isRecord(element)) {
+      continue;
+    }
+    const text = childText(element, 'display-name', 'English', new Map());
+    if (containsJapanese(text)) {
+      candidates.add(text);
+    }
+  }
+  for (const element of asArray(tv.programme)) {
+    if (!isRecord(element)) {
+      continue;
+    }
+    for (const field of ['title', 'desc', 'category']) {
+      const text = childText(element, field, 'English', new Map());
+      if (containsJapanese(text)) {
+        candidates.add(text);
+      }
+    }
+  }
+  return [...candidates];
+}
+
+function containsJapanese(value: string): boolean {
+  return /[\u3040-\u30ff\u3400-\u9fff]/.test(value);
+}
+
+function parseDocument(xml: string): Record<string, unknown> {
+  try {
+    return parser.parse(xml.replace(/^\uFEFF/, '')) as Record<string, unknown>;
+  } catch {
+    throw new Error('XMLTV document is not valid XML.');
+  }
 }
 
 function asArray(value: unknown): unknown[] {

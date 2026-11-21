@@ -5,7 +5,12 @@ import {
   formatHeaderStamp,
   listBroadcastDays,
 } from '../src/guideTime';
-import {classifyChannel, fetchXmltvGuide, parseXmltv} from '../src/xmltv';
+import {
+  classifyChannel,
+  fetchXmltvGuide,
+  parseXmltv,
+  parseXmltvForLanguage,
+} from '../src/xmltv';
 
 const FIXTURE = `<?xml version="1.0" encoding="UTF-8"?>
 <tv>
@@ -91,6 +96,45 @@ describe('parseXmltv', () => {
     const english = parseXmltv(FIXTURE, 'English');
     expect(english.channels[0].name).toBe('NHK G');
     expect(english.channels[0].programs[1].title).toBe('Morning');
+  });
+
+  test('translates Japanese fallbacks without replacing available English text', async () => {
+    const japaneseOnlyFields = `<tv>
+      <channel id="gd011"><display-name lang="ja">ＮＨＫ総合</display-name></channel>
+      <programme start="20261118050000 +0900" stop="20261118060000 +0900" channel="gd011">
+        <title lang="ja">おはよう</title>
+        <title lang="en">Good morning</title>
+        <desc lang="ja">朝のニュース</desc>
+        <category lang="ja">ニュース</category>
+      </programme>
+      <programme start="20261118060000 +0900" stop="20261118070000 +0900" channel="gd011">
+        <title lang="ja">天気予報</title>
+      </programme>
+    </tv>`;
+    const translate = jest.fn(async (texts: readonly string[]) => ({
+      translations: new Map(
+        texts.map(text => [text, `Translated ${text}`]),
+      ),
+      failedCount: 0,
+    }));
+    const english = await parseXmltvForLanguage(
+      japaneseOnlyFields,
+      'English',
+      translate,
+    );
+
+    expect(translate).toHaveBeenCalledWith(
+      expect.arrayContaining(['ＮＨＫ総合', '朝のニュース', 'ニュース', '天気予報']),
+    );
+    expect(english.channels[0].name).toBe('Translated ＮＨＫ総合');
+    expect(english.channels[0].programs[1]).toMatchObject({
+      title: 'Translated 天気予報',
+    });
+    expect(english.channels[0].programs[0]).toMatchObject({
+      title: 'Good morning',
+      description: 'Translated 朝のニュース',
+      genre: 'Translated ニュース',
+    });
   });
 
   test('rejects documents without programmes', () => {

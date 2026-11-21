@@ -34,6 +34,15 @@ If everything is set up correctly, you should see the app on an Android TV emula
 
 You can also build it from Android Studio.
 
+## Android TV EPG typography
+
+The Android text renderer uses a locally supplied `MS-Gothic.ttc` face with its embedded 1-bit
+bitmap strikes. Place the licensed TTC at
+`android/app/src/main/assets/fonts/MS-Gothic.ttc`; it is intentionally excluded from source
+control. Android's embedded-bitmap text flag is enabled and antialiasing is disabled, while the
+React Native layout, focus, and accessibility tree remain unchanged. The separate live preview and
+modal windows are not affected by the activity's text view configuration.
+
 ## Step 3: Modify your app
 
 Now that you have successfully run the app, let's make changes!

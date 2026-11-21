@@ -135,7 +135,7 @@ class LivePreviewModule(private val reactContext: ReactApplicationContext) :
           TvContract.Channels.COLUMN_INPUT_ID,
           TvContract.Channels.COLUMN_DISPLAY_NAME,
           TvContract.Channels.COLUMN_DISPLAY_NUMBER,
-          TvContract.Channels.COLUMN_PACKAGE_NAME,
+          TvContract.Channels.COLUMN_INTERNAL_PROVIDER_ID,
           TvContract.Channels.COLUMN_TYPE,
           TvContract.Channels.COLUMN_BROWSABLE,
         ),
@@ -151,20 +151,17 @@ class LivePreviewModule(private val reactContext: ReactApplicationContext) :
           it.getColumnIndex(TvContract.Channels.COLUMN_DISPLAY_NAME)
         val numberIndex =
           it.getColumnIndex(TvContract.Channels.COLUMN_DISPLAY_NUMBER)
-        val packageIndex =
-          it.getColumnIndex(TvContract.Channels.COLUMN_PACKAGE_NAME)
+        val providerIdIndex =
+          it.getColumnIndex(TvContract.Channels.COLUMN_INTERNAL_PROVIDER_ID)
         val browsableIndex =
           it.getColumnIndex(TvContract.Channels.COLUMN_BROWSABLE)
         while (it.moveToNext()) {
           if (browsableIndex >= 0 && it.getInt(browsableIndex) != 1) {
             continue
           }
-          val packageName =
-            if (packageIndex >= 0) it.getString(packageIndex) else null
           val inputId =
             if (inputIndex >= 0) it.getString(inputIndex) else null
-          if (packageName != TVIRL_PACKAGE ||
-            inputId == null ||
+          if (inputId == null ||
             !inputId.startsWith("$TVIRL_PACKAGE/")
           ) {
             continue
@@ -174,11 +171,14 @@ class LivePreviewModule(private val reactContext: ReactApplicationContext) :
             if (nameIndex >= 0) it.getString(nameIndex) else null
           val number =
             if (numberIndex >= 0) it.getString(numberIndex) else null
+          val internalProviderId =
+            if (providerIdIndex >= 0) it.getString(providerIdIndex) else null
           channels.pushMap(Arguments.createMap().apply {
             putString("id", id)
             putString("inputId", inputId)
             putString("displayName", name ?: "")
             putString("displayNumber", number ?: "")
+            putString("internalProviderId", internalProviderId)
           })
         }
       }
@@ -261,12 +261,20 @@ class LivePreviewModule(private val reactContext: ReactApplicationContext) :
       promise.resolve(false)
       return
     }
-    val uri = TvContract.buildChannelUri(channelId.toLongOrNull() ?: -1)
+    val numericChannelId = channelId.toLongOrNull()
+    if (numericChannelId == null) {
+      promise.resolve(false)
+      return
+    }
+    val uri = TvContract.buildChannelUri(numericChannelId)
     val intent = Intent(Intent.ACTION_VIEW, uri)
-    val packageName = listOf(
+    val knownTvPackages = listOf(
       "com.google.android.tv",
       "com.android.tv",
-    ).firstOrNull { packageName ->
+      "com.sony.dtv",
+      "com.sony.dtv.service",
+    )
+    val packageName = knownTvPackages.firstOrNull { packageName ->
       try {
         activity.packageManager.getPackageInfo(packageName, 0)
         true
@@ -274,11 +282,17 @@ class LivePreviewModule(private val reactContext: ReactApplicationContext) :
         false
       }
     }
-    if (packageName == null) {
-      promise.resolve(false)
-      return
+    if (packageName != null) {
+      intent.setPackage(packageName)
+    } else {
+      val resolved = activity.packageManager.resolveActivity(
+        intent,
+        PackageManager.MATCH_DEFAULT_ONLY,
+      )
+      if (resolved != null) {
+        intent.setPackage(resolved.activityInfo.packageName)
+      }
     }
-    intent.setPackage(packageName)
     try {
       activity.startActivity(intent)
       promise.resolve(true)

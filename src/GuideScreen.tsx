@@ -8,15 +8,18 @@ import React, {
 import {
   AppState,
   ActivityIndicator,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
+  Text as NativeText,
   TextInput,
+  UIManager,
   View,
   useWindowDimensions,
   useTVEventHandler,
   type HWEvent,
+  type TextProps,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -45,7 +48,15 @@ import {
   genreColors,
   mixHex,
 } from './theme';
-import { loadSources, playlistProblem, saveSources } from './sources';
+import {
+  loadFocusCursorEnabled,
+  loadLivePreviewEnabled,
+  loadSources,
+  playlistProblem,
+  saveFocusCursorEnabled,
+  saveLivePreviewEnabled,
+  saveSources,
+} from './sources';
 import { copy, type UiLanguage } from './copy';
 import {
   fetchXmltvGuide,
@@ -55,14 +66,32 @@ import {
   type GuideProgram,
   type XmltvGuide,
 } from './xmltv';
+import { translateTextsToEnglish } from './translation';
 import * as liveChannels from './liveChannels';
 import type { LivePreviewStatus } from './liveChannels';
 import {
   matchLiveChannel,
+  parsePlaylistEpgUrl,
   parsePlaylistIdentities,
   type LiveChannelRef,
   type PlaylistIdentity,
 } from './liveMatch';
+
+function Text({style, ...props}: TextProps) {
+  return (
+    <NativeText
+      {...props}
+      style={[style, {fontWeight: 'normal'}]}
+    />
+  );
+}
+
+type TranslationStatus =
+  | {kind: 'translating'; textCount: number}
+  | {kind: 'complete'; textCount: number}
+  | {kind: 'not-needed'}
+  | {kind: 'partial'; failedCount: number}
+  | {kind: 'failed'};
 
 const BADGE_COLORS = [
   '#2f6fed',
@@ -123,7 +152,17 @@ export default function GuideScreen() {
   const [dayStart, setDayStart] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [translationStatus, setTranslationStatus] =
+    useState<TranslationStatus | null>(null);
+  const [translationRetry, setTranslationRetry] = useState(0);
   const [focused, setFocused] = useState<GuideProgram | null>(null);
+  const [selectedPreviewChannelId, setSelectedPreviewChannelId] = useState<
+    string | null
+  >(null);
+  const [infoProgram, setInfoProgram] = useState<{
+    program: GuideProgram;
+    channelName: string;
+  } | null>(null);
   const [gridSize, setGridSize] = useState({ width: 0, height: 0 });
   const [viewportScrollX, setViewportScrollX] = useState(0);
   const [viewportScrollY, setViewportScrollY] = useState(0);
@@ -134,10 +173,23 @@ export default function GuideScreen() {
   const [liveRows, setLiveRows] = useState<LiveChannelRef[]>([]);
   const [playlistIdentities, setPlaylistIdentities] = useState<PlaylistIdentity[]>([]);
   const [liveStatus, setLiveStatus] = useState<LivePreviewStatus>('unavailable');
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [topControlsPreferred, setTopControlsPreferred] = useState(false);
+  const [focusCursorEnabled, setFocusCursorEnabled] = useState(true);
+  const [livePreviewEnabled, setLivePreviewEnabled] = useState(true);
+  const [focusCursorPosition, setFocusCursorPosition] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const screenRef = useRef<View>(null);
+  const focusCursorDirty = useRef(false);
+  const livePreviewDirty = useRef(false);
   const previewRef = useRef<View>(null);
+  const epgFocusEngagedRef = useRef(false);
   const tuneTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const revealFrame = useRef<number | null>(null);
   const lastMatchedRef = useRef<LiveChannelRef | null>(null);
+  const selectedPreviewChannelIdRef = useRef<string | null>(null);
 
   const bodyRef = useRef<ScrollView>(null);
   const timeLeftRef = useRef<ScrollView>(null);
@@ -148,6 +200,18 @@ export default function GuideScreen() {
   const playlistDirty = useRef(false);
   const lastFetchedXml = useRef<string | null>(null);
   const loadGeneration = useRef(0);
+  const translationXml = useRef<string | null>(null);
+  const translationBaseGuide = useRef<XmltvGuide | null>(null);
+  const translations = useRef(new Map<string, string>());
+  const translationQueue = useRef(new Set<string>());
+  const requestedTranslations = useRef(new Set<string>());
+  const translationRunning = useRef(false);
+  const translationRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const deferredTranslations = useRef(new Set<string>());
+  const translatedTextCount = useRef(0);
+  const failedTranslationCount = useRef(0);
   const scrollX = useRef(0);
   const scrollY = useRef(0);
   const actions = useRef<GuideActions>({
@@ -159,6 +223,14 @@ export default function GuideScreen() {
 
   function currentGuideTime(): number {
     return Date.now() + clockOffsetRef.current;
+  }
+
+  function clearTranslationRetry(): void {
+    if (translationRetryTimer.current !== null) {
+      clearTimeout(translationRetryTimer.current);
+      translationRetryTimer.current = null;
+    }
+    deferredTranslations.current.clear();
   }
 
   const days = useMemo(
@@ -243,6 +315,186 @@ export default function GuideScreen() {
     hourHeight,
   ]);
 
+  useEffect(() => {
+    if (
+      language !== 'English' ||
+      guide === null ||
+      translationXml.current === null
+    ) {
+      return;
+    }
+
+    const visibleTexts = new Set<string>();
+    for (const column of renderedLaidOut) {
+      const columnLeft = column.columnIndex * columnWidth;
+      if (
+        columnLeft >= viewportScrollX + trackWidth ||
+        columnLeft + columnWidth <= viewportScrollX
+      ) {
+        continue;
+      }
+      visibleTexts.add(column.channel.name);
+      for (const item of column.programs) {
+        if (
+          item.top + item.height < viewportScrollY ||
+          item.top > viewportScrollY + programViewport
+        ) {
+          continue;
+        }
+        visibleTexts.add(item.program.title);
+        if (item.height >= 88 && item.program.description !== '') {
+          visibleTexts.add(item.program.description);
+        }
+      }
+    }
+    if (infoProgram !== null) {
+      visibleTexts.add(infoProgram.program.title);
+      visibleTexts.add(infoProgram.program.description);
+    }
+
+    translationQueue.current.clear();
+    for (const text of visibleTexts) {
+      if (
+        /[\u3040-\u30ff\u3400-\u9fff]/.test(text) &&
+        !translations.current.has(text) &&
+        !requestedTranslations.current.has(text)
+      ) {
+        translationQueue.current.add(text);
+      }
+    }
+    if (translationQueue.current.size === 0 || translationRunning.current) {
+      return;
+    }
+
+    translationRunning.current = true;
+    (async () => {
+      try {
+        while (translationQueue.current.size > 0) {
+          const batch = [...translationQueue.current];
+          translationQueue.current.clear();
+          const generation = loadGeneration.current;
+          const xml = translationXml.current;
+          if (xml === null) {
+            break;
+          }
+          batch.forEach(text => requestedTranslations.current.add(text));
+          setTranslationStatus({kind: 'translating', textCount: batch.length});
+          try {
+            const result = await translateTextsToEnglish(batch);
+            if (generation !== loadGeneration.current) {
+              continue;
+            }
+            for (const [source, translated] of result.translations) {
+              if (!translations.current.has(source)) {
+                translatedTextCount.current += 1;
+              }
+              translations.current.set(source, translated);
+            }
+            failedTranslationCount.current += result.failedCount;
+            for (const source of result.failedTexts) {
+              requestedTranslations.current.delete(source);
+            }
+            if (result.deferredTexts.length > 0) {
+              result.deferredTexts.forEach(source =>
+                deferredTranslations.current.add(source),
+              );
+              if (
+                translationRetryTimer.current === null &&
+                result.retryAfterMs !== undefined
+              ) {
+                translationRetryTimer.current = setTimeout(() => {
+                  translationRetryTimer.current = null;
+                  if (generation !== loadGeneration.current) {
+                    deferredTranslations.current.clear();
+                    return;
+                  }
+                  deferredTranslations.current.forEach(source =>
+                    requestedTranslations.current.delete(source),
+                  );
+                  deferredTranslations.current.clear();
+                  setTranslationRetry(retry => retry + 1);
+                }, Math.min(result.retryAfterMs, 2_147_483_647));
+              }
+            }
+
+            const base = translationBaseGuide.current;
+            if (base !== null && result.translations.size > 0) {
+              const next: XmltvGuide = {
+                ...base,
+                channels: base.channels.map(channel => ({
+                  ...channel,
+                  name: translations.current.get(channel.name) ?? channel.name,
+                  programs: channel.programs.map(program => ({
+                    ...program,
+                    title:
+                      translations.current.get(program.title) ?? program.title,
+                    description:
+                      translations.current.get(program.description) ??
+                      program.description,
+                    genre:
+                      translations.current.get(program.genre) ?? program.genre,
+                  })),
+                })),
+              };
+              setGuide(next);
+              setFocused(current => {
+                if (current === null) {
+                  return null;
+                }
+                return (
+                  next.channels
+                    .flatMap(channel => channel.programs)
+                    .find(program => program.id === current.id) ?? current
+                );
+              });
+            }
+            setTranslationStatus(
+              result.deferredTexts.length > 0 &&
+                failedTranslationCount.current === 0
+                ? null
+                : failedTranslationCount.current > 0
+                  ? {
+                      kind: 'partial',
+                      failedCount: failedTranslationCount.current,
+                    }
+                  : {
+                      kind: 'complete',
+                      textCount: translatedTextCount.current,
+                    },
+            );
+          } catch (error) {
+            if (generation === loadGeneration.current) {
+              console.error('[translation] EPG translation batch failed.', error);
+              failedTranslationCount.current += batch.length;
+              batch.forEach(text =>
+                requestedTranslations.current.delete(text),
+              );
+              setTranslationStatus({kind: 'failed'});
+            }
+          }
+        }
+      } finally {
+        translationRunning.current = false;
+      }
+    })().catch(error => {
+      console.error('[translation] EPG translation runner failed.', error);
+      setTranslationStatus(current =>
+        current?.kind === 'translating' ? {kind: 'failed'} : current,
+      );
+    });
+  }, [
+    language,
+    guide,
+    renderedLaidOut,
+    columnWidth,
+    viewportScrollX,
+    trackWidth,
+    viewportScrollY,
+    programViewport,
+    infoProgram,
+    translationRetry,
+  ]);
+
   const onAirEntry = useMemo(() => {
     for (const column of laidOut) {
       const current = column.programs.find(
@@ -258,7 +510,17 @@ export default function GuideScreen() {
   const onAir = onAirEntry?.program ?? null;
   const bannerProgram = focused ?? onAir;
   const highlightedId = focused?.id ?? onAir?.id ?? null;
-  const previewColumn = onAirEntry?.channel ?? laidOut[0]?.channel ?? null;
+  const selectedPreviewColumn =
+    selectedPreviewChannelId === null
+      ? null
+      : laidOut.find(
+          column => column.channel.id === selectedPreviewChannelId,
+        )?.channel ?? null;
+  const previewColumn =
+    selectedPreviewColumn ??
+    onAirEntry?.channel ??
+    laidOut[0]?.channel ??
+    null;
 
   const previewMatch = useMemo(() => {
     if (previewColumn === null) {
@@ -278,7 +540,7 @@ export default function GuideScreen() {
   }, [previewColumn, playlistIdentities, liveRows]);
 
   useEffect(() => {
-    if (previewMatch === null) {
+    if (!livePreviewEnabled || previewMatch === null) {
       return;
     }
     const lastMatched = lastMatchedRef.current;
@@ -303,7 +565,7 @@ export default function GuideScreen() {
         clearTimeout(tuneTimer.current);
       }
     };
-  }, [previewMatch]);
+  }, [previewMatch, livePreviewEnabled]);
 
   const preferredId = useMemo(() => {
     if (dayStart === null) {
@@ -340,6 +602,7 @@ export default function GuideScreen() {
 
   useEffect(() => {
     return () => {
+      clearTranslationRetry();
       if (revealFrame.current !== null) {
         cancelAnimationFrame(revealFrame.current);
       }
@@ -347,12 +610,16 @@ export default function GuideScreen() {
   }, []);
 
   useEffect(() => {
+    if (!livePreviewEnabled) {
+      liveChannels.stop();
+      return;
+    }
     previewRef.current?.measureInWindow((x, y, width, height) => {
       if (width > 0 && height > 0) {
         liveChannels.setFrame(x, y, width, height);
       }
     });
-  }, [windowDimensions.width, windowDimensions.height]);
+  }, [windowDimensions.width, windowDimensions.height, livePreviewEnabled]);
 
   useEffect(() => {
     const subscription = liveChannels.subscribeStatus(status => {
@@ -395,8 +662,27 @@ export default function GuideScreen() {
     fetch(playlistUrl.trim())
       .then(response => response.ok ? response.text() : '')
       .then(text => {
-        if (!cancelled) {
-          setPlaylistIdentities(parsePlaylistIdentities(text));
+        if (cancelled) {
+          return;
+        }
+        setPlaylistIdentities(parsePlaylistIdentities(text));
+        const detectedEpgUrl = parsePlaylistEpgUrl(text);
+        if (detectedEpgUrl !== null && url.trim() === '' && !urlDirty.current) {
+          urlDirty.current = true;
+          setUrl(detectedEpgUrl);
+          saveSources({
+            epgUrl: detectedEpgUrl,
+            playlistUrl: playlistUrl.trim(),
+            language,
+          }).catch(() => undefined);
+          runGuideLoadRef
+            .current(detectedEpgUrl, language)
+            .then(loaded => {
+              if (loaded) {
+                setSettingsVisible(false);
+              }
+            })
+            .catch(() => undefined);
         }
       })
       .catch(() => {
@@ -407,12 +693,12 @@ export default function GuideScreen() {
     return () => {
       cancelled = true;
     };
-  }, [playlistUrl]);
+  }, [playlistUrl, url, language]);
 
   useEffect(() => {
-    setPreferredToken(preferredId);
-    const timer = setTimeout(() => setPreferredToken(null), 400);
-    return () => clearTimeout(timer);
+    if (!epgFocusEngagedRef.current) {
+      setPreferredToken(preferredId);
+    }
   }, [preferredId, dayStart, channelType]);
 
   useEffect(() => {
@@ -443,7 +729,13 @@ export default function GuideScreen() {
     if (event.eventKeyAction === 0) {
       return;
     }
-    if (event.eventType === 'blue') {
+    if (event.eventType === 'back') {
+      epgFocusEngagedRef.current = false;
+      setPreferredToken(null);
+      setFocused(null);
+      setInfoProgram(null);
+      setTopControlsPreferred(true);
+    } else if (event.eventType === 'blue') {
       actions.current.previousDay();
     } else if (event.eventType === 'red') {
       actions.current.nextDay();
@@ -455,16 +747,30 @@ export default function GuideScreen() {
   }, []);
   useTVEventHandler(onRemote);
 
-  async function runGuideLoad(epgUrl: string, loadLanguage: UiLanguage = language): Promise<boolean> {
+  async function runGuideLoad(
+    epgUrl: string,
+    loadLanguage: UiLanguage = language,
+  ): Promise<boolean> {
     const generation = loadGeneration.current + 1;
     loadGeneration.current = generation;
+    clearTranslationRetry();
     setLoading(true);
     setError(null);
+    setTranslationStatus(null);
+    translationXml.current = null;
+    translationBaseGuide.current = null;
+    translations.current = new Map();
+    translationQueue.current.clear();
+    requestedTranslations.current.clear();
+    translatedTextCount.current = 0;
+    failedTranslationCount.current = 0;
+    let fetchedXml: string | null = null;
     try {
       const next = await fetchXmltvGuide(
         epgUrl,
-        loadLanguage,
+        'Japanese',
         xml => {
+          fetchedXml = xml;
           lastFetchedXml.current = xml;
         },
         serverTimeMs => {
@@ -476,6 +782,9 @@ export default function GuideScreen() {
         return false;
       }
       applyGuide(next);
+      if (loadLanguage === 'English' && fetchedXml !== null) {
+        translateGuideInBackground(fetchedXml, parseXmltv(fetchedXml, 'English'));
+      }
       return true;
     } catch (loadError) {
       if (generation === loadGeneration.current) {
@@ -489,6 +798,15 @@ export default function GuideScreen() {
     }
   }
 
+  function translateGuideInBackground(
+    xml: string,
+    baseGuide: XmltvGuide,
+  ): void {
+    translationXml.current = xml;
+    translationBaseGuide.current = baseGuide;
+    setGuide(baseGuide);
+  }
+
   function applyGuide(next: XmltvGuide) {
     const nextDays = listBroadcastDays(next.earliestMs, next.latestMs);
     const today = broadcastDayStart(currentGuideTime());
@@ -496,6 +814,8 @@ export default function GuideScreen() {
     setChannelType(next.channelTypes[0] ?? null);
     setDayStart(nextDays.includes(today) ? today : nextDays[0] ?? null);
     setFocused(null);
+    selectedPreviewChannelIdRef.current = null;
+    setSelectedPreviewChannelId(null);
     setScrollToken(token => token + 1);
   }
 
@@ -521,13 +841,13 @@ export default function GuideScreen() {
     }
   }
 
-  async function loadGuide() {
+  async function loadGuide(): Promise<boolean> {
     urlDirty.current = true;
     playlistDirty.current = true;
     const problem = playlistProblem(playlistUrl);
     if (problem !== null) {
       setError(copy(language).playlistError);
-      return;
+      return false;
     }
 
     const epgUrl = url.trim();
@@ -548,12 +868,29 @@ export default function GuideScreen() {
     } else if (saved) {
       setError(null);
     }
+    if (loaded) {
+      epgFocusEngagedRef.current = false;
+      setTopControlsPreferred(false);
+      setSettingsVisible(false);
+    }
+    return loaded;
   }
 
   async function toggleLanguage() {
     const nextLanguage: UiLanguage =
       language === 'Japanese' ? 'English' : 'Japanese';
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
+    clearTranslationRetry();
     setLanguage(nextLanguage);
+    setTranslationStatus(null);
+    translationXml.current = null;
+    translationBaseGuide.current = null;
+    translations.current = new Map();
+    translationQueue.current.clear();
+    requestedTranslations.current.clear();
+    translatedTextCount.current = 0;
+    failedTranslationCount.current = 0;
     try {
       await saveSources({
         epgUrl: url.trim(),
@@ -566,11 +903,21 @@ export default function GuideScreen() {
         caught instanceof Error ? caught.message : String(caught);
       setError(`${underlying}: ${copy(nextLanguage).saveFailure}`);
     }
-    if (lastFetchedXml.current !== null) {
+    const xml = lastFetchedXml.current;
+    if (xml !== null) {
       try {
-        applyGuide(parseXmltv(lastFetchedXml.current, nextLanguage));
+        const next = parseXmltv(xml, 'Japanese');
+        if (generation !== loadGeneration.current) {
+          return;
+        }
+        applyGuide(next);
+        if (nextLanguage === 'English') {
+          translateGuideInBackground(xml, parseXmltv(xml, 'English'));
+        }
       } catch (parseError) {
-        failGuide(parseError, nextLanguage);
+        if (generation === loadGeneration.current) {
+          failGuide(parseError, nextLanguage);
+        }
       }
     }
   }
@@ -580,6 +927,28 @@ export default function GuideScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    loadFocusCursorEnabled()
+      .then(enabled => {
+        if (!cancelled && !focusCursorDirty.current) {
+          setFocusCursorEnabled(enabled);
+        }
+      })
+      .catch(caught => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
+      });
+    loadLivePreviewEnabled()
+      .then(enabled => {
+        if (!cancelled && !livePreviewDirty.current) {
+          setLivePreviewEnabled(enabled);
+        }
+      })
+      .catch(caught => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
+      });
     loadSources()
       .then(async sources => {
         if (cancelled) {
@@ -592,6 +961,9 @@ export default function GuideScreen() {
         if (!playlistDirty.current) {
           setPlaylistUrl(sources.playlistUrl);
         }
+        setSettingsVisible(
+          sources.epgUrl.trim() === '' && sources.playlistUrl.trim() === '',
+        );
         const epgUrl = sources.epgUrl.trim();
         if (cancelled || urlDirty.current || epgUrl === '') {
           return;
@@ -604,6 +976,68 @@ export default function GuideScreen() {
       loadGeneration.current += 1;
     };
   }, []);
+
+  function updateFocusCursor(event: {nativeEvent: {target: number}}) {
+    UIManager.measureInWindow(event.nativeEvent.target, (x, y, width, height) => {
+      screenRef.current?.measureInWindow((screenX, screenY) => {
+        setFocusCursorPosition({
+          x: x + width / 2 - screenX,
+          y: y + height / 2 - screenY,
+        });
+      });
+    });
+  }
+
+  function toggleFocusCursor() {
+    const next = !focusCursorEnabled;
+    focusCursorDirty.current = true;
+    setFocusCursorEnabled(next);
+    saveFocusCursorEnabled(next).catch(caught => {
+      setError(
+        `${caught instanceof Error ? caught.message : String(caught)}: ${
+          copy(language).settingSaveFailure
+        }`,
+      );
+    });
+  }
+
+  function toggleLivePreview() {
+    const next = !livePreviewEnabled;
+    livePreviewDirty.current = true;
+    setLivePreviewEnabled(next);
+    if (!next) {
+      liveChannels.stop();
+    }
+    saveLivePreviewEnabled(next).catch(caught => {
+      setError(
+        `${caught instanceof Error ? caught.message : String(caught)}: ${
+          copy(language).settingSaveFailure
+        }`,
+      );
+    });
+  }
+
+  function renderFocusCursor() {
+    if (!focusCursorEnabled || focusCursorPosition === null) {
+      return null;
+    }
+    return (
+      <View
+        pointerEvents="none"
+        testID="focus-cursor"
+        style={[
+          styles.focusCursor,
+          {
+            left: focusCursorPosition.x - 26,
+            top: focusCursorPosition.y + 4,
+          },
+        ]}
+      >
+        <Text style={styles.focusCursorHand}>{'☝︎'}</Text>
+        <View style={styles.focusCursorCuff} />
+      </View>
+    );
+  }
 
   function reveal(columnIndex: number, top: number, height: number) {
     const viewport = programViewport;
@@ -642,6 +1076,7 @@ export default function GuideScreen() {
     if (next === undefined || next === dayStart) {
       return;
     }
+    epgFocusEngagedRef.current = false;
     setDayStart(next);
     setFocused(null);
   }
@@ -653,6 +1088,7 @@ export default function GuideScreen() {
     if (guide === null) {
       return;
     }
+    epgFocusEngagedRef.current = false;
     const today = broadcastDayStart(currentGuideTime());
     const available = listBroadcastDays(guide.earliestMs, guide.latestMs);
     if (available.includes(today)) {
@@ -665,6 +1101,7 @@ export default function GuideScreen() {
     if (guide === null || guide.channelTypes.length === 0) {
       return;
     }
+    epgFocusEngagedRef.current = false;
     setChannelType(current => {
       const index = guide.channelTypes.indexOf(
         current ?? guide.channelTypes[0],
@@ -684,7 +1121,11 @@ export default function GuideScreen() {
   const marks = dayStart === null ? [] : hourMarks(dayStart);
 
   return (
-    <View style={[styles.screen, { paddingTop: insets.top }]}>
+    <View
+      ref={screenRef}
+      style={[styles.screen, { paddingTop: insets.top }]}
+      onFocus={updateFocusCursor}
+    >
       <View style={styles.brandRow}>
         <Text style={styles.wordmark}>G-GUIDE</Text>
         <Text style={styles.title}>{title}</Text>
@@ -692,80 +1133,50 @@ export default function GuideScreen() {
           {`${copy(language).showingPrefix}${language === 'English' ? ' ' : ''}${displayContent}`}
         </Text>
         <Text style={styles.stamp}>{formatHeaderStamp(now, language)}</Text>
-        <View style={styles.urlRow}>
-          <Text style={styles.fieldLabel}>EPG</Text>
-          <TextInput
-            ref={urlRef}
-            value={url}
-            onChangeText={value => {
-              urlDirty.current = true;
-              setUrl(value);
-            }}
-            onSubmitEditing={() => {
-              loadGuide().catch(() => undefined);
-            }}
-            placeholder="XMLTV URL"
-            placeholderTextColor="#8d8d8d"
-            autoCapitalize="none"
-            autoCorrect={false}
-            inputMode="url"
-            returnKeyType="go"
-            style={styles.urlInput}
-          />
-          <Text style={styles.fieldLabel}>IPTV</Text>
-          <TextInput
-            value={playlistUrl}
-            onChangeText={value => {
-              playlistDirty.current = true;
-              setPlaylistUrl(value);
-            }}
-            onSubmitEditing={() => {
-              loadGuide().catch(() => undefined);
-            }}
-            placeholder="M3U / M3U8"
-            placeholderTextColor="#8d8d8d"
-            autoCapitalize="none"
-            autoCorrect={false}
-            inputMode="url"
-            returnKeyType="go"
-            accessibilityLabel={copy(language).playlistAccessibility}
-            style={styles.urlInput}
-          />
-          <Pressable
-            accessibilityLabel={copy(language).languageControlAccessibility}
-            onPress={() => {
-              toggleLanguage().catch(() => undefined);
-            }}
-            style={({ focused: tvFocused }) => [
-              styles.languageButton,
-              tvFocused && styles.focusedControl,
-            ]}
-          >
-            <Text style={styles.loadLabel}>
-              {copy(language).languageControl}
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityLabel={copy(language).loadAccessibility}
-            onPress={() => {
-              loadGuide().catch(() => undefined);
-            }}
-            disabled={loading}
-            style={({ focused: tvFocused }) => [
-              styles.loadButton,
-              tvFocused && styles.focusedControl,
-              loading && styles.disabled,
-            ]}
-          >
-            {loading ? (
-              <ActivityIndicator color="#ffffff" size="small" />
-            ) : (
-              <Text style={styles.loadLabel}>{copy(language).load}</Text>
-            )}
-          </Pressable>
-        </View>
+        <Pressable
+          accessibilityLabel={copy(language).settingsAccessibility}
+          hasTVPreferredFocus={topControlsPreferred}
+          isTVSelectable={topControlsPreferred}
+          onPress={() => {
+            setTopControlsPreferred(false);
+            setSettingsVisible(true);
+          }}
+          style={({ focused: tvFocused }) => [
+            styles.settingsButton,
+            tvFocused && styles.focusedControl,
+          ]}
+        >
+          <Text style={styles.loadLabel}>{copy(language).settings}</Text>
+        </Pressable>
       </View>
-      {error !== null ? <Text style={styles.error}>{error}</Text> : null}
+      {error !== null || translationStatus !== null ? (
+        <View
+          testID="guide-message-strip"
+          style={styles.messageStrip}
+        >
+          {error !== null ? <Text style={styles.error}>{error}</Text> : null}
+          {translationStatus !== null ? (
+            <Text
+              style={
+                translationStatus.kind === 'partial' ||
+                translationStatus.kind === 'failed'
+                  ? styles.error
+                  : styles.status
+              }
+            >
+              {translationStatus.kind === 'translating'
+                ? copy(language).translationProgress(translationStatus.textCount)
+                : translationStatus.kind === 'complete'
+                  ? copy(language).translationComplete(translationStatus.textCount)
+                  : translationStatus.kind === 'not-needed'
+                    ? copy(language).translationNotNeeded
+                    : translationStatus.kind === 'partial'
+                      ? copy(language).translationFailure(translationStatus.failedCount)
+                      : copy(language).translationFailed}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
 
       {guide !== null && channelType !== null && dayStart !== null ? (
         <>
@@ -780,7 +1191,9 @@ export default function GuideScreen() {
                 <Pressable
                   key={type}
                   accessibilityLabel={copy(language).chips[type]}
+                  isTVSelectable={topControlsPreferred}
                   onPress={() => {
+                    epgFocusEngagedRef.current = false;
                     setChannelType(type);
                     setFocused(null);
                   }}
@@ -813,6 +1226,7 @@ export default function GuideScreen() {
                   <Pressable
                     key={day}
                     accessibilityLabel={formatDayTab(day, true, language)}
+                    isTVSelectable={topControlsPreferred}
                     onPress={() => selectDay(day)}
                     style={({ focused: tvFocused }) => [
                       styles.dayTab,
@@ -834,6 +1248,7 @@ export default function GuideScreen() {
               <Pressable
                 accessibilityLabel="Show later days"
                 disabled={dayIndex < 0 || dayIndex >= days.length - 1}
+                isTVSelectable={topControlsPreferred}
                 onPress={() => selectDay(days[dayIndex + 1])}
                 style={({ focused: tvFocused }) => [
                   styles.dayMore,
@@ -850,33 +1265,35 @@ export default function GuideScreen() {
       ) : null}
 
       <View style={styles.programHeader}>
-        <View
-          ref={previewRef}
-          testID="live-preview"
-          isTVSelectable={false}
-          style={styles.livePreview}
-          onLayout={() => {
-            previewRef.current?.measureInWindow((x, y, width, height) => {
-              if (width > 0 && height > 0) {
-                liveChannels.setFrame(x, y, width, height);
-              }
-            });
-          }}
-        >
-          {liveStatus !== 'playing' || previewMatch === null ? (
-            <View style={styles.liveCaption} pointerEvents="none">
-              <Text style={styles.liveCaptionText}>
-                {liveStatus === 'permission'
-                  ? copy(language).livePermissionMissing
-                  : liveRows.length === 0
-                    ? copy(language).liveNoChannels
-                    : previewColumn === null
-                      ? ''
-                      : copy(language).liveNoMatch(previewColumn.name)}
-              </Text>
-            </View>
-          ) : null}
-        </View>
+        {livePreviewEnabled ? (
+          <View
+            ref={previewRef}
+            testID="live-preview"
+            isTVSelectable={false}
+            style={styles.livePreview}
+            onLayout={() => {
+              previewRef.current?.measureInWindow((x, y, width, height) => {
+                if (width > 0 && height > 0) {
+                  liveChannels.setFrame(x, y, width, height);
+                }
+              });
+            }}
+          >
+            {liveStatus !== 'playing' || previewMatch === null ? (
+              <View style={styles.liveCaption} pointerEvents="none">
+                <Text style={styles.liveCaptionText}>
+                  {liveStatus === 'permission'
+                    ? copy(language).livePermissionMissing
+                    : liveRows.length === 0
+                      ? copy(language).liveNoChannels
+                      : previewColumn === null
+                        ? ''
+                        : copy(language).liveNoMatch(previewColumn.name)}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
         {guide !== null && channelType !== null && dayStart !== null ? (
           <ProgramBanner program={bannerProgram} language={language} />
         ) : null}
@@ -1035,11 +1452,24 @@ export default function GuideScreen() {
                               }
                               preferred={item.program.id === preferredToken}
                               onFocus={() => {
+                                epgFocusEngagedRef.current = true;
                                 setPreferredToken(null);
+                                setTopControlsPreferred(false);
                                 setFocused(item.program);
                                 reveal(column.columnIndex, item.top, item.height);
                               }}
                               onPress={() => {
+                                const currentTime = currentGuideTime();
+                                if (
+                                  item.program.startMs > currentTime ||
+                                  item.program.endMs <= currentTime
+                                ) {
+                                  setInfoProgram({
+                                    program: item.program,
+                                    channelName: column.channel.name,
+                                  });
+                                  return;
+                                }
                                 const labels = channelLabels(column.channel);
                                 const match = matchLiveChannel(
                                   {
@@ -1052,7 +1482,30 @@ export default function GuideScreen() {
                                   liveRows,
                                 );
                                 if (match !== null) {
-                                  liveChannels.openChannel(match.id).catch(() => undefined);
+                                  if (
+                                    selectedPreviewChannelIdRef.current ===
+                                      column.channel.id ||
+                                    selectedPreviewChannelId === column.channel.id
+                                  ) {
+                                    if (tuneTimer.current !== null) {
+                                      clearTimeout(tuneTimer.current);
+                                      tuneTimer.current = null;
+                                    }
+                                    liveChannels
+                                      .openChannel(match.id)
+                                      .catch(caughtError =>
+                                        console.error(
+                                          'Failed to open channel',
+                                          caughtError,
+                                        ),
+                                      );
+                                    return;
+                                  }
+                                  selectedPreviewChannelIdRef.current =
+                                    column.channel.id;
+                                  setSelectedPreviewChannelId(
+                                    column.channel.id,
+                                  );
                                 }
                               }}
                             />
@@ -1081,7 +1534,11 @@ export default function GuideScreen() {
         <View style={styles.footerGroup}>
           <Pressable
             accessibilityLabel="Submenu"
-            onPress={() => urlRef.current?.focus()}
+            isTVSelectable={topControlsPreferred}
+            onPress={() => {
+              setTopControlsPreferred(false);
+              setSettingsVisible(true);
+            }}
             style={({ focused: tvFocused }) => [
               styles.footerButton,
               tvFocused && styles.focusedControl,
@@ -1092,7 +1549,17 @@ export default function GuideScreen() {
           </Pressable>
           <Pressable
             accessibilityLabel="Back"
-            onPress={() => setFocused(null)}
+            isTVSelectable={topControlsPreferred}
+            onPress={() => {
+              if (infoProgram !== null) {
+                setInfoProgram(null);
+              } else {
+                epgFocusEngagedRef.current = false;
+                setFocused(null);
+                setPreferredToken(null);
+                setTopControlsPreferred(true);
+              }
+            }}
             style={({ focused: tvFocused }) => [
               styles.footerButton,
               tvFocused && styles.focusedControl,
@@ -1135,6 +1602,205 @@ export default function GuideScreen() {
           />
         </View>
       </View>
+      <Modal
+        visible={settingsVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSettingsVisible(false)}
+      >
+        <View style={styles.modalRoot}>
+          <View style={styles.infoOverlay}>
+            <View style={styles.settingsDialog}>
+            <Text style={styles.settingsTitle}>{copy(language).settings}</Text>
+            <Pressable
+              accessibilityLabel={copy(language).focusCursor}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: focusCursorEnabled }}
+              testID="focus-cursor-setting"
+              onPress={toggleFocusCursor}
+              style={({ focused: tvFocused }) => [
+                styles.focusCursorSetting,
+                tvFocused && styles.focusedControl,
+              ]}
+            >
+              <View style={styles.focusCursorSettingCopy}>
+                <Text style={styles.fieldLabel}>
+                  {copy(language).focusCursor}
+                </Text>
+                <Text style={styles.focusCursorHint}>
+                  {copy(language).focusCursorHint}
+                </Text>
+              </View>
+              <Text style={styles.focusCursorValue}>
+                {focusCursorEnabled ? 'ON' : 'OFF'}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityLabel={copy(language).livePreview}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: livePreviewEnabled }}
+              testID="live-preview-setting"
+              onPress={toggleLivePreview}
+              style={({ focused: tvFocused }) => [
+                styles.focusCursorSetting,
+                tvFocused && styles.focusedControl,
+              ]}
+            >
+              <View style={styles.focusCursorSettingCopy}>
+                <Text style={styles.fieldLabel}>
+                  {copy(language).livePreview}
+                </Text>
+                <Text style={styles.focusCursorHint}>
+                  {copy(language).livePreviewHint}
+                </Text>
+              </View>
+              <Text style={styles.focusCursorValue}>
+                {livePreviewEnabled ? 'ON' : 'OFF'}
+              </Text>
+            </Pressable>
+            <Text style={styles.fieldLabel}>{copy(language).epgLabel}</Text>
+            <TextInput
+              ref={urlRef}
+              value={url}
+              onChangeText={value => {
+                urlDirty.current = true;
+                setUrl(value);
+              }}
+              onSubmitEditing={() => {
+                loadGuide().catch(() => undefined);
+              }}
+              placeholder="XMLTV URL"
+              placeholderTextColor="#8d8d8d"
+              autoCapitalize="none"
+              autoCorrect={false}
+              inputMode="url"
+              returnKeyType="go"
+              style={styles.settingsInput}
+            />
+            <Text style={styles.fieldLabel}>{copy(language).playlistLabel}</Text>
+            <TextInput
+              value={playlistUrl}
+              onChangeText={value => {
+                playlistDirty.current = true;
+                setPlaylistUrl(value);
+              }}
+              onSubmitEditing={() => {
+                loadGuide().catch(() => undefined);
+              }}
+              placeholder="M3U / M3U8"
+              placeholderTextColor="#8d8d8d"
+              autoCapitalize="none"
+              autoCorrect={false}
+              inputMode="url"
+              returnKeyType="go"
+              accessibilityLabel={copy(language).playlistAccessibility}
+              style={styles.settingsInput}
+            />
+            <View style={styles.settingsActions}>
+              <Pressable
+                accessibilityLabel={copy(language).languageControlAccessibility}
+                disabled={loading}
+                onPress={() => {
+                  toggleLanguage().catch(() => undefined);
+                }}
+                style={({ focused: tvFocused }) => [
+                  styles.languageButton,
+                  tvFocused && styles.focusedControl,
+                  loading && styles.disabled,
+                ]}
+              >
+                <Text style={styles.loadLabel}>
+                  {copy(language).languageControl}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel={copy(language).loadAccessibility}
+                onPress={() => {
+                  loadGuide().catch(() => undefined);
+                }}
+                disabled={loading}
+                style={({ focused: tvFocused }) => [
+                  styles.loadButton,
+                  tvFocused && styles.focusedControl,
+                  loading && styles.disabled,
+                ]}
+              >
+                {loading ? (
+                  <ActivityIndicator color="#ffffff" size="small" />
+                ) : (
+                  <Text style={styles.loadLabel}>{copy(language).load}</Text>
+                )}
+              </Pressable>
+              <Pressable
+                accessibilityLabel={copy(language).close}
+                hasTVPreferredFocus={settingsVisible}
+                onPress={() => {
+                  epgFocusEngagedRef.current = false;
+                  setTopControlsPreferred(false);
+                  setSettingsVisible(false);
+                  setPreferredToken(preferredId);
+                }}
+                style={({ focused: tvFocused }) => [
+                  styles.settingsCloseButton,
+                  tvFocused && styles.focusedControl,
+                ]}
+              >
+                <Text style={styles.infoCloseText}>{copy(language).close}</Text>
+              </Pressable>
+            </View>
+            </View>
+          </View>
+          {renderFocusCursor()}
+        </View>
+      </Modal>
+      <Modal
+        visible={infoProgram !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setInfoProgram(null)}
+      >
+        <View style={styles.modalRoot}>
+          <View style={styles.infoOverlay}>
+            <View style={styles.infoDialog}>
+            {infoProgram !== null ? (
+              <>
+                <Text style={styles.infoChannel}>
+                  {infoProgram.channelName}
+                </Text>
+                <Text style={styles.infoTitle}>
+                  {infoProgram.program.title}
+                </Text>
+                <Text style={styles.infoTime}>
+                  {formatBannerDate(infoProgram.program.startMs, language)}{' '}
+                  {formatClock(infoProgram.program.startMs)}～
+                  {formatClock(infoProgram.program.endMs)}
+                </Text>
+                <ScrollView style={styles.infoDescriptionScroll}>
+                  <Text style={styles.infoDescription}>
+                    {infoProgram.program.description}
+                  </Text>
+                </ScrollView>
+                <Pressable
+                  accessibilityLabel={copy(language).close}
+                  hasTVPreferredFocus={infoProgram !== null}
+                  onPress={() => setInfoProgram(null)}
+                  style={({ focused: tvFocused }) => [
+                    styles.infoCloseButton,
+                    tvFocused && styles.focusedControl,
+                  ]}
+                >
+                  <Text style={styles.infoCloseText}>
+                    {copy(language).close}
+                  </Text>
+                </Pressable>
+              </>
+            ) : null}
+            </View>
+          </View>
+          {renderFocusCursor()}
+        </View>
+      </Modal>
+      {settingsVisible || infoProgram !== null ? null : renderFocusCursor()}
     </View>
   );
 }
@@ -1345,6 +2011,35 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: chrome.screen,
   },
+  modalRoot: {
+    flex: 1,
+  },
+  focusCursor: {
+    position: 'absolute',
+    width: 52,
+    height: 60,
+    zIndex: 100,
+  },
+  focusCursorHand: {
+    position: 'absolute',
+    top: -5,
+    left: 0,
+    color: '#ffffff',
+    fontSize: 56,
+    lineHeight: 60,
+    textShadowColor: '#168bff',
+    textShadowOffset: {width: 2, height: 2},
+    textShadowRadius: 3,
+  },
+  focusCursorCuff: {
+    position: 'absolute',
+    bottom: 1,
+    left: 13,
+    width: 23,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#168bff',
+  },
   livePreview: {
     width: 240,
     height: 136,
@@ -1398,6 +2093,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
+  settingsButton: {
+    height: 26,
+    marginLeft: 'auto',
+    paddingHorizontal: 10,
+    borderRadius: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: chrome.blue,
+  },
   urlRow: {
     flex: 1,
     flexDirection: 'row',
@@ -1443,10 +2147,30 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
+  messageStrip: {
+    minHeight: 20,
+    marginHorizontal: 8,
+    marginBottom: 2,
+    paddingHorizontal: 8,
+    flexDirection: 'row',
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    columnGap: 12,
+    borderRadius: 2,
+    backgroundColor: 'rgba(17, 17, 17, 0.96)',
+  },
   error: {
-    paddingHorizontal: 10,
-    paddingBottom: 2,
+    paddingVertical: 2,
+    textAlign: 'right',
     color: colors.error,
+    fontSize: 12,
+  },
+  status: {
+    paddingVertical: 2,
+    textAlign: 'right',
+    color: chrome.muted,
     fontSize: 12,
   },
   dateRow: {
@@ -1783,5 +2507,131 @@ const styles = StyleSheet.create({
   },
   disabled: {
     opacity: 0.35,
+  },
+  infoOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+  },
+  infoDialog: {
+    width: '100%',
+    maxWidth: 760,
+    maxHeight: '90%',
+    padding: 24,
+    backgroundColor: '#222222',
+    borderWidth: 1,
+    borderColor: '#777777',
+  },
+  settingsDialog: {
+    width: '100%',
+    maxWidth: 640,
+    padding: 24,
+    backgroundColor: '#222222',
+    borderWidth: 1,
+    borderColor: '#777777',
+  },
+  settingsTitle: {
+    color: '#ffffff',
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 16,
+  },
+  focusCursorSetting: {
+    minHeight: 56,
+    marginBottom: 14,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: '#777777',
+    backgroundColor: chrome.field,
+  },
+  focusCursorSettingCopy: {
+    flex: 1,
+    paddingVertical: 8,
+  },
+  focusCursorHint: {
+    color: chrome.muted,
+    fontSize: 12,
+    marginTop: 3,
+  },
+  focusCursorValue: {
+    minWidth: 54,
+    marginLeft: 12,
+    paddingVertical: 6,
+    textAlign: 'center',
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '800',
+    backgroundColor: chrome.blue,
+  },
+  settingsInput: {
+    width: '100%',
+    height: 42,
+    marginTop: 6,
+    marginBottom: 14,
+    paddingHorizontal: 12,
+    borderRadius: 2,
+    backgroundColor: chrome.field,
+    color: '#ffffff',
+    fontSize: 16,
+  },
+  settingsActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
+  },
+  settingsCloseButton: {
+    minWidth: 96,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 2,
+    backgroundColor: '#555555',
+  },
+  infoChannel: {
+    color: chrome.muted,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  infoTitle: {
+    color: '#ffffff',
+    fontSize: 24,
+    lineHeight: 32,
+    fontWeight: '800',
+  },
+  infoTime: {
+    color: chrome.bannerBody,
+    fontSize: 16,
+    marginTop: 10,
+    marginBottom: 16,
+  },
+  infoDescriptionScroll: {
+    flexGrow: 0,
+    maxHeight: 320,
+  },
+  infoDescription: {
+    color: '#ffffff',
+    fontSize: 17,
+    lineHeight: 25,
+  },
+  infoCloseButton: {
+    alignSelf: 'flex-end',
+    minWidth: 96,
+    alignItems: 'center',
+    marginTop: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: chrome.blue,
+  },
+  infoCloseText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

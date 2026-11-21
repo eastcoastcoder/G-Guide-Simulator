@@ -69,3 +69,6 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+reference/
+android/app/src/main/assets/fonts/*
