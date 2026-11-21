@@ -1,18 +1,19 @@
 {
-  "name": "MyTVApp",
+  "name": "G-Guide",
   "version": "0.0.1",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
-    "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "^3.1.1",
+    "@react-native/new-app-screen": "0.83.0",
+    "fast-xml-parser": "^4.5.7",
     "react": "19.2.0",
     "react-native": "npm:react-native-tvos@0.83.0-0",
-    "@react-native/new-app-screen": "0.83.0",
     "react-native-safe-area-context": "^5.5.2"
   },
   "devDependencies": {
@@ -21,7 +22,6 @@
     "@babel/runtime": "^7.25.0",
     "@react-native-community/cli": "20.0.0",
     "@react-native-community/cli-platform-android": "20.0.0",
-    "@react-native-community/cli-platform-ios": "20.0.0",
     "@react-native/babel-preset": "0.83.0",
     "@react-native/eslint-config": "0.83.0",
     "@react-native/metro-config": "0.83.0",

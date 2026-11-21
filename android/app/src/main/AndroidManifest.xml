@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_TV_LISTINGS" />
+
+    <queries>
+        <package android:name="by.stari4ek.tvirl" />
+        <package android:name="com.google.android.tv" />
+        <package android:name="com.android.tv" />
+    </queries>
  
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.faketouch" android:required="false" />
