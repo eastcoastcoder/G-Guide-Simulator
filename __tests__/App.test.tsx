@@ -5,10 +5,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
+import {BackHandler, Text} from 'react-native';
 import App from '../App';
 import * as liveChannels from '../src/liveChannels';
 import {
   FOCUS_CURSOR_STORAGE_KEY,
+  CACHED_GUIDE_STORAGE_KEY,
   LIVE_PREVIEW_STORAGE_KEY,
   SOURCES_STORAGE_KEY,
 } from '../src/sources';
@@ -28,6 +30,184 @@ jest.mock('../src/liveChannels', () => ({
 
 beforeEach(async () => {
   await AsyncStorage.clear();
+});
+
+test('shows a matching cached guide before a deferred refresh replaces it', async () => {
+  await AsyncStorage.setItem(
+    SOURCES_STORAGE_KEY,
+    JSON.stringify({
+      epgUrl: 'https://example.test/saved.xml',
+      playlistUrl: '',
+      language: 'Japanese',
+    }),
+  );
+  await AsyncStorage.setItem(
+    CACHED_GUIDE_STORAGE_KEY,
+    JSON.stringify({
+      epgUrl: 'https://example.test/saved.xml',
+      xml: FIXTURE,
+    }),
+  );
+  let resolveFetch!: (value: {
+    ok: boolean;
+    status: number;
+    text: () => Promise<string>;
+  }) => void;
+  const fetchMock = jest.fn(
+    () =>
+      new Promise(resolve => {
+        resolveFetch = resolve;
+      }),
+  );
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  let renderer: ReactTestRenderer.ReactTestRenderer;
+  try {
+    await ReactTestRenderer.act(() => {
+      renderer = ReactTestRenderer.create(<App />);
+    });
+    await flush();
+    const cacheGrid = renderer!.root.findByProps({testID: 'guide-grid'});
+    await ReactTestRenderer.act(() => {
+      cacheGrid.props.onLayout({
+        nativeEvent: {layout: {x: 0, y: 0, width: 1600, height: 800}},
+      });
+    });
+    await flush();
+    expect(
+      renderer!.root.findAll(
+        node => typeof node.props.accessibilityLabel === 'string' &&
+          node.props.accessibilityLabel.includes('おはよう'),
+      ).length,
+    ).toBeGreaterThan(0);
+
+    await ReactTestRenderer.act(async () => {
+      resolveFetch({
+        ok: true,
+        status: 200,
+        text: async () => FIXTURE.replace('おはよう', '更新番組'),
+      });
+      await flush();
+    });
+    expect(
+      renderer!.root.findAll(
+        node => typeof node.props.accessibilityLabel === 'string' &&
+          node.props.accessibilityLabel.includes('更新番組'),
+      ).length,
+    ).toBeGreaterThan(0);
+  } finally {
+    await ReactTestRenderer.act(() => {
+      renderer!.unmount();
+    });
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ignores an EPG mismatch cache and shows loading while fetch is pending', async () => {
+  await AsyncStorage.setItem(
+    SOURCES_STORAGE_KEY,
+    JSON.stringify({
+      epgUrl: 'https://example.test/current.xml',
+      playlistUrl: '',
+      language: 'Japanese',
+    }),
+  );
+  await AsyncStorage.setItem(
+    CACHED_GUIDE_STORAGE_KEY,
+    JSON.stringify({
+      epgUrl: 'https://example.test/old.xml',
+      xml: FIXTURE,
+    }),
+  );
+  const fetchMock = jest.fn(() => new Promise<never>(() => undefined));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  let renderer: ReactTestRenderer.ReactTestRenderer;
+  try {
+    await ReactTestRenderer.act(() => {
+      renderer = ReactTestRenderer.create(<App />);
+    });
+    await flush();
+    expect(
+      renderer!.root.findAll(
+        node => node.props.children === '番組表を読み込んでいます。',
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(
+      renderer!.root.findAll(
+        node => typeof node.props.children === 'string' &&
+          node.props.children.includes('KonomiTV'),
+      ).length,
+    ).toBe(0);
+  } finally {
+    await ReactTestRenderer.act(() => {
+      renderer!.unmount();
+    });
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('hardware back clears programme focus and prefers the selected day', async () => {
+  await AsyncStorage.setItem(
+    SOURCES_STORAGE_KEY,
+    JSON.stringify({
+      epgUrl: 'https://example.test/saved.xml',
+      playlistUrl: '',
+      language: 'Japanese',
+    }),
+  );
+  let hardwareBack!: () => boolean;
+  const addListener = jest
+    .spyOn(BackHandler, 'addEventListener')
+    .mockImplementation((_event, handler) => {
+      hardwareBack = handler as () => boolean;
+      return {remove: jest.fn()};
+    });
+  const fetchMock = jest.fn(async () => ({
+    ok: true,
+    status: 200,
+    text: async () => FIXTURE,
+  }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  let renderer: ReactTestRenderer.ReactTestRenderer;
+  try {
+    await ReactTestRenderer.act(() => {
+      renderer = ReactTestRenderer.create(<App />);
+    });
+    await flush();
+    const grid = renderer!.root.findByProps({testID: 'guide-grid'});
+    await ReactTestRenderer.act(() => {
+      grid.props.onLayout({
+        nativeEvent: {layout: {x: 0, y: 0, width: 1600, height: 800}},
+      });
+    });
+    await flush();
+    const programme = renderer!.root.findAll(
+      node => typeof node.props.accessibilityLabel === 'string' &&
+        node.props.accessibilityLabel.startsWith('おはよう,'),
+    )[0];
+    await ReactTestRenderer.act(() => {
+      programme.props.onFocus();
+    });
+    expect(hardwareBack()).toBe(true);
+    await ReactTestRenderer.act(async () => {
+      await flush();
+    });
+    expect(
+      renderer!.root.findAll(
+        node => node.props.isTVSelectable === true &&
+          node.props.hasTVPreferredFocus === true,
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(hardwareBack()).toBe(false);
+  } finally {
+    addListener.mockRestore();
+    await ReactTestRenderer.act(() => {
+      renderer!.unmount();
+    });
+    globalThis.fetch = originalFetch;
+  }
 });
 
 async function flush() {
@@ -217,6 +397,7 @@ test('selecting the same current programme twice opens its channel', async () =>
   const currentFixture = `<tv>
     <channel id="gd011"><display-name lang="ja">ＮＨＫ総合</display-name></channel>
     <channel id="gd012"><display-name lang="ja">Ｅテレ</display-name></channel>
+    <channel id="gd013"><display-name lang="ja">未登録チャンネル</display-name></channel>
     <programme start="${start} +0000" stop="${end} +0000" channel="gd011">
       <title lang="ja">現在の番組</title>
       <desc lang="ja">放送中</desc>
@@ -224,6 +405,10 @@ test('selecting the same current programme twice opens its channel', async () =>
     <programme start="${start} +0000" stop="${end} +0000" channel="gd012">
       <title lang="ja">別の現在番組</title>
       <desc lang="ja">放送中</desc>
+    </programme>
+    <programme start="${start} +0000" stop="${end} +0000" channel="gd013">
+      <title lang="ja">未登録の番組</title>
+      <desc lang="ja">Live Channels にない</desc>
     </programme>
   </tv>`;
   const fetchMock = jest.fn(async () => ({
@@ -248,7 +433,16 @@ test('selecting the same current programme twice opens its channel', async () =>
         displayNumber: '012',
       },
     ],
-    status: 'unavailable',
+    status: 'playing',
+  });
+  let statusListener:
+    | ((status: 'tuning' | 'playing' | 'unavailable' | 'permission') => void)
+    | null = null;
+  const originalSubscribe =
+    jest.mocked(liveChannels.subscribeStatus).getMockImplementation();
+  jest.mocked(liveChannels.subscribeStatus).mockImplementation(listener => {
+    statusListener = listener;
+    return null;
   });
   jest.mocked(liveChannels.tune).mockClear();
   jest.mocked(liveChannels.openChannel).mockClear();
@@ -291,6 +485,56 @@ test('selecting the same current programme twice opens its channel', async () =>
       'other-live-channel',
     );
 
+    await ReactTestRenderer.act(() => {
+      statusListener?.('tuning');
+    });
+    let previewText = renderer!.root
+      .findByProps({ testID: 'live-preview' })
+      .findAllByType(Text)
+      .map(node => String(node.props.children))
+      .join(' ');
+    expect(previewText).not.toContain('not in Live Channels');
+    expect(previewText).not.toContain('Live Channels にありません');
+
+    await ReactTestRenderer.act(() => {
+      statusListener?.('playing');
+    });
+    previewText = renderer!.root
+      .findByProps({ testID: 'live-preview' })
+      .findAllByType(Text)
+      .map(node => String(node.props.children))
+      .join(' ');
+    expect(previewText).not.toContain('not in Live Channels');
+    expect(previewText).not.toContain('Live Channels にありません');
+
+    const unmatchedProgram = renderer!.root.find(
+      node =>
+        typeof node.props.accessibilityLabel === 'string' &&
+        node.props.accessibilityLabel.startsWith('未登録の番組, '),
+    );
+    await ReactTestRenderer.act(async () => {
+      unmatchedProgram.props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, 300));
+    });
+    previewText = renderer!.root
+      .findByProps({ testID: 'live-preview' })
+      .findAllByType(Text)
+      .map(node => String(node.props.children))
+      .join(' ');
+    expect(previewText).toContain('未登録チャンネル');
+    expect(previewText).not.toMatch(/^:\s*(not in Live Channels|Live Channels にありません)/);
+
+    await ReactTestRenderer.act(async () => {
+      renderer!.root
+        .find(node =>
+          typeof node.props.accessibilityLabel === 'string' &&
+          node.props.accessibilityLabel.startsWith('別の現在番組, '),
+        )
+        .props.onPress();
+    });
+
     await ReactTestRenderer.act(async () => {
       renderer!.root
         .find(node =>
@@ -309,6 +553,13 @@ test('selecting the same current programme twice opens its channel', async () =>
       channels: [],
       status: 'unavailable',
     });
+    if (originalSubscribe) {
+      jest
+        .mocked(liveChannels.subscribeStatus)
+        .mockImplementation(originalSubscribe);
+    } else {
+      jest.mocked(liveChannels.subscribeStatus).mockImplementation(() => null);
+    }
     await ReactTestRenderer.act(() => {
       renderer!.unmount();
     });

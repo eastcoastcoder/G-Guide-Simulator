@@ -7,12 +7,14 @@ import React, {
 } from 'react';
 import {
   AppState,
+  BackHandler,
   Pressable,
   ScrollView,
   StyleSheet,
   TextInput,
   UIManager,
   View,
+  findNodeHandle,
   useWindowDimensions,
   useTVEventHandler,
   type HWEvent,
@@ -43,7 +45,9 @@ import {
   loadFocusCursorEnabled,
   loadLivePreviewEnabled,
   loadSources,
+  loadCachedGuide,
   playlistProblem,
+  saveCachedGuide,
   saveFocusCursorEnabled,
   saveLivePreviewEnabled,
   saveSources,
@@ -98,6 +102,8 @@ export default function GuideScreen() {
   const [channelType, setChannelType] = useState<ChannelType | null>(null);
   const [dayStart, setDayStart] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [initialLoadSettled, setInitialLoadSettled] = useState(false);
+  const [bootLoading, setBootLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [translationStatus, setTranslationStatus] =
     useState<TranslationStatus | null>(null);
@@ -140,6 +146,15 @@ export default function GuideScreen() {
   const revealFrame = useRef<number | null>(null);
   const lastMatchedRef = useRef<LiveChannelRef | null>(null);
   const selectedPreviewChannelIdRef = useRef<string | null>(null);
+  const guideRef = useRef<XmltvGuide | null>(null);
+  const settingsVisibleRef = useRef(false);
+  const infoProgramRef = useRef<{
+    program: GuideProgram;
+    channelName: string;
+  } | null>(null);
+  const topControlsPreferredRef = useRef(false);
+  const settingsButtonRef = useRef<View>(null);
+  const selectedDayRef = useRef<View>(null);
 
   const bodyRef = useRef<ScrollView>(null);
   const timeLeftRef = useRef<ScrollView>(null);
@@ -149,6 +164,7 @@ export default function GuideScreen() {
   const urlDirty = useRef(false);
   const playlistDirty = useRef(false);
   const lastFetchedXml = useRef<string | null>(null);
+  const displayedXmlRef = useRef<string | null>(null);
   const loadGeneration = useRef(0);
   const translationXml = useRef<string | null>(null);
   const translationBaseGuide = useRef<XmltvGuide | null>(null);
@@ -170,6 +186,11 @@ export default function GuideScreen() {
     jumpToNow: () => undefined,
     cycleChannelType: () => undefined,
   });
+
+  guideRef.current = guide;
+  settingsVisibleRef.current = settingsVisible;
+  infoProgramRef.current = infoProgram;
+  topControlsPreferredRef.current = topControlsPreferred;
 
   function currentGuideTime(): number {
     return Date.now() + clockOffsetRef.current;
@@ -628,7 +649,12 @@ export default function GuideScreen() {
                 setSettingsVisible(false);
               }
             })
-            .catch(() => undefined);
+            .catch(() => {
+              if (!cancelled) {
+                setInitialLoadSettled(true);
+                setBootLoading(false);
+              }
+            });
         }
       })
       .catch(() => {
@@ -671,16 +697,36 @@ export default function GuideScreen() {
     return () => cancelAnimationFrame(frame);
   }, [dayStart, channelType, programViewport, hourHeight, scrollToken]);
 
+  const handleBack = useCallback((): boolean => {
+    if (settingsVisibleRef.current) {
+      settingsVisibleRef.current = false;
+      setSettingsVisible(false);
+      setTopControlsPreferred(true);
+      topControlsPreferredRef.current = true;
+      return true;
+    }
+    if (infoProgramRef.current !== null) {
+      infoProgramRef.current = null;
+      setInfoProgram(null);
+      return true;
+    }
+    if (epgFocusEngagedRef.current) {
+      epgFocusEngagedRef.current = false;
+      setPreferredToken(null);
+      setFocused(null);
+      setTopControlsPreferred(true);
+      topControlsPreferredRef.current = true;
+      return true;
+    }
+    return false;
+  }, []);
+
   const onRemote = useCallback((event: HWEvent) => {
     if (event.eventKeyAction === 0) {
       return;
     }
     if (event.eventType === 'back') {
-      epgFocusEngagedRef.current = false;
-      setPreferredToken(null);
-      setFocused(null);
-      setInfoProgram(null);
-      setTopControlsPreferred(true);
+      handleBack();
     } else if (event.eventType === 'blue') {
       actions.current.previousDay();
     } else if (event.eventType === 'red') {
@@ -690,8 +736,16 @@ export default function GuideScreen() {
     } else if (event.eventType === 'yellow') {
       actions.current.cycleChannelType();
     }
-  }, []);
+  }, [handleBack]);
   useTVEventHandler(onRemote);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      handleBack,
+    );
+    return () => subscription.remove();
+  }, [handleBack]);
 
   async function runGuideLoad(
     epgUrl: string,
@@ -727,7 +781,16 @@ export default function GuideScreen() {
       if (generation !== loadGeneration.current) {
         return false;
       }
-      applyGuide(next);
+      if (fetchedXml !== null && fetchedXml === displayedXmlRef.current) {
+        // The refresh produced the XML already displayed.
+      } else {
+        applyGuide(next, guideRef.current !== null);
+      }
+      if (fetchedXml !== null) {
+        lastFetchedXml.current = fetchedXml;
+        displayedXmlRef.current = fetchedXml;
+        saveCachedGuide(epgUrl, fetchedXml).catch(() => undefined);
+      }
       if (loadLanguage === 'English' && fetchedXml !== null) {
         translateGuideInBackground(
           fetchedXml,
@@ -756,12 +819,28 @@ export default function GuideScreen() {
     setGuide(baseGuide);
   }
 
-  function applyGuide(next: XmltvGuide) {
+  function applyGuide(next: XmltvGuide, preserveSelection = false) {
     const nextDays = listBroadcastDays(next.earliestMs, next.latestMs);
     const today = broadcastDayStart(currentGuideTime());
     setGuide(next);
-    setChannelType(next.channelTypes[0] ?? null);
-    setDayStart(nextDays.includes(today) ? today : nextDays[0] ?? null);
+    if (
+      preserveSelection &&
+      channelType !== null &&
+      next.channelTypes.includes(channelType)
+    ) {
+      setChannelType(channelType);
+    } else {
+      setChannelType(next.channelTypes[0] ?? null);
+    }
+    if (
+      preserveSelection &&
+      dayStart !== null &&
+      nextDays.includes(dayStart)
+    ) {
+      setDayStart(dayStart);
+    } else {
+      setDayStart(nextDays.includes(today) ? today : nextDays[0] ?? null);
+    }
     setFocused(null);
     selectedPreviewChannelIdRef.current = null;
     setSelectedPreviewChannelId(null);
@@ -772,9 +851,11 @@ export default function GuideScreen() {
     loadError: unknown,
     failureLanguage: UiLanguage = language,
   ) {
-    setGuide(null);
-    setChannelType(null);
-    setDayStart(null);
+    if (guideRef.current === null) {
+      setGuide(null);
+      setChannelType(null);
+      setDayStart(null);
+    }
     const t = copy(failureLanguage);
     if (loadError instanceof Error) {
       if (loadError.message.includes('URL is not set')) {
@@ -921,10 +1002,46 @@ export default function GuideScreen() {
           sources.epgUrl.trim() === '' && sources.playlistUrl.trim() === '',
         );
         const epgUrl = sources.epgUrl.trim();
-        if (cancelled || urlDirty.current || epgUrl === '') {
+        if (cancelled || urlDirty.current) {
+          setInitialLoadSettled(true);
+          setBootLoading(false);
           return;
         }
+        if (epgUrl === '') {
+          setInitialLoadSettled(true);
+          setBootLoading(false);
+          return;
+        }
+        try {
+          const cached = await loadCachedGuide(epgUrl);
+          if (!cancelled && cached !== null) {
+            try {
+              const cachedGuide = parseXmltv(cached.xml, sources.language);
+              lastFetchedXml.current = cached.xml;
+              displayedXmlRef.current = cached.xml;
+              const cachedDays = listBroadcastDays(
+                cachedGuide.earliestMs,
+                cachedGuide.latestMs,
+              );
+              const today = broadcastDayStart(currentGuideTime());
+              setGuide(cachedGuide);
+              setChannelType(cachedGuide.channelTypes[0] ?? null);
+              setDayStart(
+                cachedDays.includes(today) ? today : cachedDays[0] ?? null,
+              );
+              setFocused(null);
+            } catch {
+              // Ignore an invalid cached guide.
+            }
+          }
+        } catch {
+          // Ignore cache read failures.
+        }
         await runGuideLoadRef.current(epgUrl, sources.language);
+        if (!cancelled) {
+          setInitialLoadSettled(true);
+          setBootLoading(false);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -1078,6 +1195,8 @@ export default function GuideScreen() {
         liveRows,
       );
       if (match === null) {
+        selectedPreviewChannelIdRef.current = channel.id;
+        setSelectedPreviewChannelId(channel.id);
         return;
       }
       if (
@@ -1163,9 +1282,12 @@ export default function GuideScreen() {
         </Text>
         <Text style={styles.stamp}>{formatHeaderStamp(now, language)}</Text>
         <Pressable
+          ref={settingsButtonRef}
           accessibilityLabel={copy(language).settingsAccessibility}
-          hasTVPreferredFocus={topControlsPreferred}
           isTVSelectable={topControlsPreferred}
+          nextFocusDown={
+            findNodeHandle(selectedDayRef.current) ?? undefined
+          }
           onPress={() => {
             setTopControlsPreferred(false);
             setSettingsVisible(true);
@@ -1257,8 +1379,13 @@ export default function GuideScreen() {
                 return (
                   <Pressable
                     key={day}
+                    ref={selected ? selectedDayRef : undefined}
                     accessibilityLabel={formatDayTab(day, true, language)}
                     isTVSelectable={topControlsPreferred}
+                    hasTVPreferredFocus={selected && topControlsPreferred}
+                    nextFocusUp={
+                      findNodeHandle(settingsButtonRef.current) ?? undefined
+                    }
                     onPress={() => selectDay(day)}
                     style={({ focused: tvFocused }) => [
                       styles.dayTab,
@@ -1312,16 +1439,25 @@ export default function GuideScreen() {
               });
             }}
           >
-            {liveStatus !== 'playing' || previewMatch === null ? (
+            {liveStatus === 'permission' ||
+            ((liveRows.length === 0 || liveStatus === 'unavailable') &&
+              previewMatch === null) ||
+            (previewMatch === null &&
+              previewColumn !== null &&
+              liveStatus !== 'tuning') ? (
               <View style={styles.liveCaption} pointerEvents="none">
                 <Text style={styles.liveCaptionText}>
                   {liveStatus === 'permission'
                     ? copy(language).livePermissionMissing
-                    : liveRows.length === 0
+                    : (liveRows.length === 0 || liveStatus === 'unavailable') &&
+                      previewMatch === null
                     ? copy(language).liveNoChannels
                     : previewColumn === null
                     ? ''
-                    : copy(language).liveNoMatch(previewColumn.name)}
+                    : copy(language).liveNoMatch(
+                        previewColumn.name.trim() ||
+                          channelLabels(previewColumn).service,
+                      )}
                 </Text>
               </View>
             ) : null}
@@ -1332,12 +1468,16 @@ export default function GuideScreen() {
         ) : null}
       </View>
 
-      {guide === null ? (
+      {guide === null && (!initialLoadSettled || bootLoading) ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyBody}>{copy(language).loadingBody}</Text>
+        </View>
+      ) : guide === null && error === null ? (
         <View style={styles.empty}>
           <Text style={styles.emptyTitle}>{copy(language).emptyTitle}</Text>
           <Text style={styles.emptyBody}>{copy(language).emptyBody}</Text>
         </View>
-      ) : (
+      ) : guide === null ? null : (
         <View
           testID="guide-grid"
           style={styles.grid}
@@ -1471,10 +1611,17 @@ export default function GuideScreen() {
         playlistUrl={playlistUrl}
         loading={loading}
         urlRef={urlRef}
-        onRequestClose={() => setSettingsVisible(false)}
+        onRequestClose={() => {
+          settingsVisibleRef.current = false;
+          setSettingsVisible(false);
+          setTopControlsPreferred(true);
+          topControlsPreferredRef.current = true;
+        }}
         onClose={() => {
           epgFocusEngagedRef.current = false;
           setTopControlsPreferred(false);
+          topControlsPreferredRef.current = false;
+          settingsVisibleRef.current = false;
           setSettingsVisible(false);
           setPreferredToken(preferredId);
         }}
@@ -1574,6 +1721,7 @@ const styles = StyleSheet.create({
     width: 240,
     height: 136,
     flexShrink: 0,
+    overflow: 'hidden',
     backgroundColor: 'transparent',
   },
   programHeader: {
@@ -1585,7 +1733,11 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   liveCaption: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'flex-end',
     padding: 8,
     backgroundColor: 'rgba(0, 0, 0, 0.72)',
