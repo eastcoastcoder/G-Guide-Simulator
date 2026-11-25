@@ -7,30 +7,23 @@ import React, {
 } from 'react';
 import {
   AppState,
-  ActivityIndicator,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
-  Text as NativeText,
   TextInput,
   UIManager,
   View,
   useWindowDimensions,
   useTVEventHandler,
   type HWEvent,
-  type TextProps,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
   broadcastDayStart,
-  formatBannerDate,
-  formatClock,
   formatDayTab,
   formatHeaderStamp,
   hourMarks,
-  jstParts,
   listBroadcastDays,
   timeOffsetY,
 } from './guideTime';
@@ -45,8 +38,6 @@ import {
   VISIBLE_HOURS,
   chrome,
   colors,
-  genreColors,
-  mixHex,
 } from './theme';
 import {
   loadFocusCursorEnabled,
@@ -76,69 +67,25 @@ import {
   type LiveChannelRef,
   type PlaylistIdentity,
 } from './liveMatch';
-
-function Text({style, ...props}: TextProps) {
-  return (
-    <NativeText
-      {...props}
-      style={[style, {fontWeight: 'normal'}]}
-    />
-  );
-}
+import GuideGrid from './components/GuideGrid';
+import Text from './components/GuideText';
+import ProgramBanner from './components/ProgramBanner';
+import GuideSettingsModal from './components/GuideSettingsModal';
+import ProgramInfoModal from './components/ProgramInfoModal';
+import { channelLabels } from './guidePresentation';
 
 type TranslationStatus =
-  | {kind: 'translating'; textCount: number}
-  | {kind: 'complete'; textCount: number}
-  | {kind: 'not-needed'}
-  | {kind: 'partial'; failedCount: number}
-  | {kind: 'failed'};
-
-const BADGE_COLORS = [
-  '#2f6fed',
-  '#e23d8c',
-  '#f0a020',
-  '#7b4fe0',
-  '#1490c8',
-  '#1aa35a',
-  '#d23b3b',
-  '#5c6bc0',
-  '#00897b',
-  '#ef6c00',
-  '#8e24aa',
-  '#546e7a',
-];
-
-interface LaidProgram {
-  program: GuideProgram;
-  top: number;
-  height: number;
-}
+  | { kind: 'translating'; textCount: number }
+  | { kind: 'complete'; textCount: number }
+  | { kind: 'not-needed' }
+  | { kind: 'partial'; failedCount: number }
+  | { kind: 'failed' };
 
 interface GuideActions {
   previousDay: () => void;
   nextDay: () => void;
   jumpToNow: () => void;
   cycleChannelType: () => void;
-}
-
-function channelLabels(channel: GuideChannel): {
-  remote: string;
-  service: string;
-} {
-  const raw = channel.id.replace(/^xmltv:/, '');
-  const tail = raw.match(/(\d+)$/);
-  if (tail && tail[1].length >= 3) {
-    const service = tail[1].slice(-3);
-    const remoteDigit = service.startsWith('0') ? service[1] : service[0];
-    return { remote: String(Number(remoteDigit)), service };
-  }
-  if (tail) {
-    return {
-      remote: String(Number(tail[1])),
-      service: tail[1].padStart(3, '0'),
-    };
-  }
-  return { remote: channel.number, service: channel.number.padStart(3, '0') };
 }
 
 export default function GuideScreen() {
@@ -171,8 +118,11 @@ export default function GuideScreen() {
   const [preferredToken, setPreferredToken] = useState<string | null>(null);
   const [scrollToken, setScrollToken] = useState(0);
   const [liveRows, setLiveRows] = useState<LiveChannelRef[]>([]);
-  const [playlistIdentities, setPlaylistIdentities] = useState<PlaylistIdentity[]>([]);
-  const [liveStatus, setLiveStatus] = useState<LivePreviewStatus>('unavailable');
+  const [playlistIdentities, setPlaylistIdentities] = useState<
+    PlaylistIdentity[]
+  >([]);
+  const [liveStatus, setLiveStatus] =
+    useState<LivePreviewStatus>('unavailable');
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [topControlsPreferred, setTopControlsPreferred] = useState(false);
   const [focusCursorEnabled, setFocusCursorEnabled] = useState(true);
@@ -293,16 +243,17 @@ export default function GuideScreen() {
 
     return laidOut
       .map((column, columnIndex) => ({ column, columnIndex }))
-      .filter(({ columnIndex }) =>
-        columnIndex >= firstColumn && columnIndex <= lastColumn,
+      .filter(
+        ({ columnIndex }) =>
+          columnIndex >= firstColumn && columnIndex <= lastColumn,
       )
       .map(({ column, columnIndex }) => ({
         ...column,
         columnIndex,
         programs: column.programs.filter(
           item =>
-            item.top + item.height >= firstY &&
-            item.top <= lastY,
+            (item.top + item.height >= firstY && item.top <= lastY) ||
+            (item.program.startMs <= now && item.program.endMs > now),
         ),
       }));
   }, [
@@ -313,6 +264,7 @@ export default function GuideScreen() {
     viewportScrollY,
     programViewport,
     hourHeight,
+    now,
   ]);
 
   useEffect(() => {
@@ -378,7 +330,10 @@ export default function GuideScreen() {
             break;
           }
           batch.forEach(text => requestedTranslations.current.add(text));
-          setTranslationStatus({kind: 'translating', textCount: batch.length});
+          setTranslationStatus({
+            kind: 'translating',
+            textCount: batch.length,
+          });
           try {
             const result = await translateTextsToEnglish(batch);
             if (generation !== loadGeneration.current) {
@@ -453,23 +408,24 @@ export default function GuideScreen() {
                 failedTranslationCount.current === 0
                 ? null
                 : failedTranslationCount.current > 0
-                  ? {
-                      kind: 'partial',
-                      failedCount: failedTranslationCount.current,
-                    }
-                  : {
-                      kind: 'complete',
-                      textCount: translatedTextCount.current,
-                    },
+                ? {
+                    kind: 'partial',
+                    failedCount: failedTranslationCount.current,
+                  }
+                : {
+                    kind: 'complete',
+                    textCount: translatedTextCount.current,
+                  },
             );
           } catch (error) {
             if (generation === loadGeneration.current) {
-              console.error('[translation] EPG translation batch failed.', error);
-              failedTranslationCount.current += batch.length;
-              batch.forEach(text =>
-                requestedTranslations.current.delete(text),
+              console.error(
+                '[translation] EPG translation batch failed.',
+                error,
               );
-              setTranslationStatus({kind: 'failed'});
+              failedTranslationCount.current += batch.length;
+              batch.forEach(text => requestedTranslations.current.delete(text));
+              setTranslationStatus({ kind: 'failed' });
             }
           }
         }
@@ -479,7 +435,7 @@ export default function GuideScreen() {
     })().catch(error => {
       console.error('[translation] EPG translation runner failed.', error);
       setTranslationStatus(current =>
-        current?.kind === 'translating' ? {kind: 'failed'} : current,
+        current?.kind === 'translating' ? { kind: 'failed' } : current,
       );
     });
   }, [
@@ -513,14 +469,10 @@ export default function GuideScreen() {
   const selectedPreviewColumn =
     selectedPreviewChannelId === null
       ? null
-      : laidOut.find(
-          column => column.channel.id === selectedPreviewChannelId,
-        )?.channel ?? null;
+      : laidOut.find(column => column.channel.id === selectedPreviewChannelId)
+          ?.channel ?? null;
   const previewColumn =
-    selectedPreviewColumn ??
-    onAirEntry?.channel ??
-    laidOut[0]?.channel ??
-    null;
+    selectedPreviewColumn ?? onAirEntry?.channel ?? laidOut[0]?.channel ?? null;
 
   const previewMatch = useMemo(() => {
     if (previewColumn === null) {
@@ -555,10 +507,7 @@ export default function GuideScreen() {
     }
     tuneTimer.current = setTimeout(() => {
       lastMatchedRef.current = previewMatch;
-      liveChannels.tune(
-        previewMatch.inputId,
-        previewMatch.id,
-      );
+      liveChannels.tune(previewMatch.inputId, previewMatch.id);
     }, 250);
     return () => {
       if (tuneTimer.current !== null) {
@@ -593,10 +542,7 @@ export default function GuideScreen() {
   }, [laidOut, dayStart, now]);
 
   useEffect(() => {
-    const timer = setInterval(
-      () => setNow(currentGuideTime()),
-      60 * 1000,
-    );
+    const timer = setInterval(() => setNow(currentGuideTime()), 60 * 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -660,7 +606,7 @@ export default function GuideScreen() {
       return;
     }
     fetch(playlistUrl.trim())
-      .then(response => response.ok ? response.text() : '')
+      .then(response => (response.ok ? response.text() : ''))
       .then(text => {
         if (cancelled) {
           return;
@@ -783,7 +729,10 @@ export default function GuideScreen() {
       }
       applyGuide(next);
       if (loadLanguage === 'English' && fetchedXml !== null) {
-        translateGuideInBackground(fetchedXml, parseXmltv(fetchedXml, 'English'));
+        translateGuideInBackground(
+          fetchedXml,
+          parseXmltv(fetchedXml, 'English'),
+        );
       }
       return true;
     } catch (loadError) {
@@ -819,7 +768,10 @@ export default function GuideScreen() {
     setScrollToken(token => token + 1);
   }
 
-  function failGuide(loadError: unknown, failureLanguage: UiLanguage = language) {
+  function failGuide(
+    loadError: unknown,
+    failureLanguage: UiLanguage = language,
+  ) {
     setGuide(null);
     setChannelType(null);
     setDayStart(null);
@@ -863,8 +815,12 @@ export default function GuideScreen() {
     const loaded = await runGuideLoad(epgUrl);
     if (loaded && !saved) {
       const underlying =
-        saveError instanceof Error ? saveError.message : String(saveError ?? '');
-      setError(`${underlying ? `${underlying}: ` : ''}${copy(language).saveFailure}`);
+        saveError instanceof Error
+          ? saveError.message
+          : String(saveError ?? '');
+      setError(
+        `${underlying ? `${underlying}: ` : ''}${copy(language).saveFailure}`,
+      );
     } else if (saved) {
       setError(null);
     }
@@ -977,15 +933,18 @@ export default function GuideScreen() {
     };
   }, []);
 
-  function updateFocusCursor(event: {nativeEvent: {target: number}}) {
-    UIManager.measureInWindow(event.nativeEvent.target, (x, y, width, height) => {
-      screenRef.current?.measureInWindow((screenX, screenY) => {
-        setFocusCursorPosition({
-          x: x + width / 2 - screenX,
-          y: y + height / 2 - screenY,
+  function updateFocusCursor(event: { nativeEvent: { target: number } }) {
+    UIManager.measureInWindow(
+      event.nativeEvent.target,
+      (x, y, width, height) => {
+        screenRef.current?.measureInWindow((screenX, screenY) => {
+          setFocusCursorPosition({
+            x: x + width / 2 - screenX,
+            y: y + height / 2 - screenY,
+          });
         });
-      });
-    });
+      },
+    );
   }
 
   function toggleFocusCursor() {
@@ -1039,38 +998,108 @@ export default function GuideScreen() {
     );
   }
 
-  function reveal(columnIndex: number, top: number, height: number) {
-    const viewport = programViewport;
-    const maxY = Math.max(0, gridContentHeight - viewport);
-    const maxX = Math.max(0, columns.length * columnWidth - trackWidth);
-    let nextX = scrollX.current;
-    let nextY = scrollY.current;
-    const cellLeft = columnIndex * columnWidth;
-    if (cellLeft < nextX) {
-      nextX = cellLeft;
-    } else if (cellLeft + columnWidth > nextX + trackWidth) {
-      nextX = cellLeft + columnWidth - trackWidth;
-    }
-    if (top < nextY + 4) {
-      nextY = Math.max(0, top - 4);
-    } else if (top + Math.min(height, viewport) > nextY + viewport - 4) {
-      nextY = Math.max(0, top + Math.min(height, viewport) - viewport + 4);
-    }
-    scrollX.current = Math.min(maxX, Math.max(0, nextX));
-    scrollY.current = Math.min(maxY, Math.max(0, nextY));
-    setViewportScrollX(scrollX.current);
-    setViewportScrollY(scrollY.current);
-    if (revealFrame.current !== null) {
-      cancelAnimationFrame(revealFrame.current);
-    }
-    revealFrame.current = requestAnimationFrame(() => {
-      revealFrame.current = null;
-      horizontalRef.current?.scrollTo({ x: scrollX.current, animated: false });
-      bodyRef.current?.scrollTo({ y: scrollY.current, animated: false });
-      timeLeftRef.current?.scrollTo({ y: scrollY.current, animated: false });
-      timeRightRef.current?.scrollTo({ y: scrollY.current, animated: false });
-    });
-  }
+  const reveal = useCallback(
+    (columnIndex: number, top: number, height: number) => {
+      const viewport = programViewport;
+      const maxY = Math.max(0, gridContentHeight - viewport);
+      const maxX = Math.max(0, columns.length * columnWidth - trackWidth);
+      let nextX = scrollX.current;
+      let nextY = scrollY.current;
+      const cellLeft = columnIndex * columnWidth;
+      if (cellLeft < nextX) {
+        nextX = cellLeft;
+      } else if (cellLeft + columnWidth > nextX + trackWidth) {
+        nextX = cellLeft + columnWidth - trackWidth;
+      }
+      if (top < nextY + 4) {
+        nextY = Math.max(0, top - 4);
+      } else if (top + Math.min(height, viewport) > nextY + viewport - 4) {
+        nextY = Math.max(0, top + Math.min(height, viewport) - viewport + 4);
+      }
+      scrollX.current = Math.min(maxX, Math.max(0, nextX));
+      scrollY.current = Math.min(maxY, Math.max(0, nextY));
+      setViewportScrollX(scrollX.current);
+      setViewportScrollY(scrollY.current);
+      if (revealFrame.current !== null) {
+        cancelAnimationFrame(revealFrame.current);
+      }
+      revealFrame.current = requestAnimationFrame(() => {
+        revealFrame.current = null;
+        horizontalRef.current?.scrollTo({
+          x: scrollX.current,
+          animated: false,
+        });
+        bodyRef.current?.scrollTo({ y: scrollY.current, animated: false });
+        timeLeftRef.current?.scrollTo({ y: scrollY.current, animated: false });
+        timeRightRef.current?.scrollTo({ y: scrollY.current, animated: false });
+      });
+    },
+    [
+      programViewport,
+      gridContentHeight,
+      columns.length,
+      columnWidth,
+      trackWidth,
+    ],
+  );
+
+  const onProgramFocus = useCallback(
+    (
+      program: GuideProgram,
+      columnIndex: number,
+      top: number,
+      height: number,
+    ) => {
+      epgFocusEngagedRef.current = true;
+      setPreferredToken(null);
+      setTopControlsPreferred(false);
+      setFocused(program);
+      reveal(columnIndex, top, height);
+    },
+    [reveal],
+  );
+
+  const onProgramPress = useCallback(
+    (program: GuideProgram, channel: GuideChannel) => {
+      const currentTime = currentGuideTime();
+      if (program.startMs > currentTime || program.endMs <= currentTime) {
+        setInfoProgram({ program, channelName: channel.name });
+        return;
+      }
+      const labels = channelLabels(channel);
+      const match = matchLiveChannel(
+        {
+          id: channel.id,
+          name: channel.name,
+          number: channel.number,
+          serviceNumber: labels.service,
+        },
+        playlistIdentities,
+        liveRows,
+      );
+      if (match === null) {
+        return;
+      }
+      if (
+        selectedPreviewChannelIdRef.current === channel.id ||
+        selectedPreviewChannelId === channel.id
+      ) {
+        if (tuneTimer.current !== null) {
+          clearTimeout(tuneTimer.current);
+          tuneTimer.current = null;
+        }
+        liveChannels
+          .openChannel(match.id)
+          .catch(caughtError =>
+            console.error('Failed to open channel', caughtError),
+          );
+        return;
+      }
+      selectedPreviewChannelIdRef.current = channel.id;
+      setSelectedPreviewChannelId(channel.id);
+    },
+    [playlistIdentities, liveRows, selectedPreviewChannelId],
+  );
 
   function selectDay(next: number | undefined) {
     if (next === undefined || next === dayStart) {
@@ -1112,10 +1141,8 @@ export default function GuideScreen() {
     setFocused(null);
   };
 
-  const title =
-    copy(language).guideTitles[channelType ?? 'GR'];
-  const displayContent =
-    copy(language).displayContent[channelType ?? 'GR'];
+  const title = copy(language).guideTitles[channelType ?? 'GR'];
+  const displayContent = copy(language).displayContent[channelType ?? 'GR'];
   const gridReady =
     gridSize.height > 0 && gridSize.width > 0 && dayStart !== null;
   const marks = dayStart === null ? [] : hourMarks(dayStart);
@@ -1130,7 +1157,9 @@ export default function GuideScreen() {
         <Text style={styles.wordmark}>G-GUIDE</Text>
         <Text style={styles.title}>{title}</Text>
         <Text style={styles.displayContent}>
-          {`${copy(language).showingPrefix}${language === 'English' ? ' ' : ''}${displayContent}`}
+          {`${copy(language).showingPrefix}${
+            language === 'English' ? ' ' : ''
+          }${displayContent}`}
         </Text>
         <Text style={styles.stamp}>{formatHeaderStamp(now, language)}</Text>
         <Pressable
@@ -1150,10 +1179,7 @@ export default function GuideScreen() {
         </Pressable>
       </View>
       {error !== null || translationStatus !== null ? (
-        <View
-          testID="guide-message-strip"
-          style={styles.messageStrip}
-        >
+        <View testID="guide-message-strip" style={styles.messageStrip}>
           {error !== null ? <Text style={styles.error}>{error}</Text> : null}
           {translationStatus !== null ? (
             <Text
@@ -1165,14 +1191,20 @@ export default function GuideScreen() {
               }
             >
               {translationStatus.kind === 'translating'
-                ? copy(language).translationProgress(translationStatus.textCount)
+                ? copy(language).translationProgress(
+                    translationStatus.textCount,
+                  )
                 : translationStatus.kind === 'complete'
-                  ? copy(language).translationComplete(translationStatus.textCount)
-                  : translationStatus.kind === 'not-needed'
-                    ? copy(language).translationNotNeeded
-                    : translationStatus.kind === 'partial'
-                      ? copy(language).translationFailure(translationStatus.failedCount)
-                      : copy(language).translationFailed}
+                ? copy(language).translationComplete(
+                    translationStatus.textCount,
+                  )
+                : translationStatus.kind === 'not-needed'
+                ? copy(language).translationNotNeeded
+                : translationStatus.kind === 'partial'
+                ? copy(language).translationFailure(
+                    translationStatus.failedCount,
+                  )
+                : copy(language).translationFailed}
             </Text>
           ) : null}
         </View>
@@ -1239,6 +1271,7 @@ export default function GuideScreen() {
                         styles.dayTabText,
                         selected && styles.dayTabTextSelected,
                       ]}
+                      numberOfLines={1}
                     >
                       {formatDayTab(day, selected, language)}
                     </Text>
@@ -1285,10 +1318,10 @@ export default function GuideScreen() {
                   {liveStatus === 'permission'
                     ? copy(language).livePermissionMissing
                     : liveRows.length === 0
-                      ? copy(language).liveNoChannels
-                      : previewColumn === null
-                        ? ''
-                        : copy(language).liveNoMatch(previewColumn.name)}
+                    ? copy(language).liveNoChannels
+                    : previewColumn === null
+                    ? ''
+                    : copy(language).liveNoMatch(previewColumn.name)}
                 </Text>
               </View>
             ) : null}
@@ -1318,212 +1351,35 @@ export default function GuideScreen() {
           }}
         >
           {gridReady ? (
-            <>
-              <TimeRuler
-                scrollRef={timeLeftRef}
-                marks={marks}
-                hourHeight={hourHeight}
-                viewportHeight={programViewport}
-                language={language}
-              />
-              <ScrollView
-                ref={horizontalRef}
-                horizontal
-                isTVSelectable={false}
-                showsHorizontalScrollIndicator={false}
-                nestedScrollEnabled
-                directionalLockEnabled
-                style={styles.track}
-                onScroll={event => {
-                  const x = event.nativeEvent.contentOffset.x;
-                  scrollX.current = x;
-                  setViewportScrollX(x);
-                }}
-                scrollEventThrottle={16}
-              >
-                <View
-                  style={{
-                    width: Math.max(trackWidth, laidOut.length * columnWidth),
-                  }}
-                >
-                  <View
-                    style={[
-                      styles.headerRow,
-                      {
-                        height: CHANNEL_HEADER_HEIGHT,
-                        width: Math.max(
-                          trackWidth,
-                          laidOut.length * columnWidth,
-                        ),
-                      },
-                    ]}
-                  >
-                    {laidOut.map((column, columnIndex) => {
-                      const labels = channelLabels(column.channel);
-                      return (
-                        <View
-                          key={column.channel.id}
-                          style={[styles.channelHeader, { width: columnWidth }]}
-                        >
-                          <View style={styles.channelIdentity}>
-                            <View
-                              style={[
-                                styles.badge,
-                                {
-                                  backgroundColor:
-                                    BADGE_COLORS[
-                                      columnIndex % BADGE_COLORS.length
-                                    ],
-                                },
-                              ]}
-                            >
-                              <Text style={styles.badgeText}>
-                                {labels.remote}
-                              </Text>
-                            </View>
-                            <Text style={styles.serviceNumber}>
-                              {labels.service}
-                            </Text>
-                          </View>
-                          <Text style={styles.channelName} numberOfLines={1}>
-                            {column.channel.name}
-                          </Text>
-                        </View>
-                      );
-                    })}
-                  </View>
-                  <ScrollView
-                    ref={bodyRef}
-                    isTVSelectable={false}
-                    nestedScrollEnabled
-                    showsVerticalScrollIndicator={false}
-                    style={{ height: programViewport }}
-                    onScroll={event => {
-                      const y = event.nativeEvent.contentOffset.y;
-                      scrollY.current = y;
-                      setViewportScrollY(y);
-                      timeLeftRef.current?.scrollTo({ y, animated: false });
-                      timeRightRef.current?.scrollTo({ y, animated: false });
-                    }}
-                    scrollEventThrottle={16}
-                  >
-                    <View
-                      style={[
-                        styles.canvas,
-                        {
-                          width: laidOut.length * columnWidth,
-                          height: gridContentHeight,
-                        },
-                      ]}
-                    >
-                      {Array.from({ length: 48 }, (_, index) => (
-                        <View
-                          key={index}
-                          pointerEvents="none"
-                          style={[
-                            styles.hourRule,
-                            index % 2 === 0
-                              ? styles.hourRuleMajor
-                              : styles.hourRuleMinor,
-                            { top: (index * hourHeight) / 2 },
-                          ]}
-                        />
-                      ))}
-                      {renderedLaidOut.map(column => (
-                        <View
-                          key={column.channel.id}
-                          style={[
-                            styles.column,
-                            {
-                              left: column.columnIndex * columnWidth,
-                              width: columnWidth,
-                              height: gridContentHeight,
-                            },
-                          ]}
-                        >
-                          {column.programs.map(item => (
-                            <ProgramCell
-                              key={item.program.id}
-                              item={item}
-                              now={now}
-                              highlighted={item.program.id === highlightedId}
-                              onAir={
-                                onAir !== null && item.program.id === onAir.id
-                              }
-                              preferred={item.program.id === preferredToken}
-                              onFocus={() => {
-                                epgFocusEngagedRef.current = true;
-                                setPreferredToken(null);
-                                setTopControlsPreferred(false);
-                                setFocused(item.program);
-                                reveal(column.columnIndex, item.top, item.height);
-                              }}
-                              onPress={() => {
-                                const currentTime = currentGuideTime();
-                                if (
-                                  item.program.startMs > currentTime ||
-                                  item.program.endMs <= currentTime
-                                ) {
-                                  setInfoProgram({
-                                    program: item.program,
-                                    channelName: column.channel.name,
-                                  });
-                                  return;
-                                }
-                                const labels = channelLabels(column.channel);
-                                const match = matchLiveChannel(
-                                  {
-                                    id: column.channel.id,
-                                    name: column.channel.name,
-                                    number: column.channel.number,
-                                    serviceNumber: labels.service,
-                                  },
-                                  playlistIdentities,
-                                  liveRows,
-                                );
-                                if (match !== null) {
-                                  if (
-                                    selectedPreviewChannelIdRef.current ===
-                                      column.channel.id ||
-                                    selectedPreviewChannelId === column.channel.id
-                                  ) {
-                                    if (tuneTimer.current !== null) {
-                                      clearTimeout(tuneTimer.current);
-                                      tuneTimer.current = null;
-                                    }
-                                    liveChannels
-                                      .openChannel(match.id)
-                                      .catch(caughtError =>
-                                        console.error(
-                                          'Failed to open channel',
-                                          caughtError,
-                                        ),
-                                      );
-                                    return;
-                                  }
-                                  selectedPreviewChannelIdRef.current =
-                                    column.channel.id;
-                                  setSelectedPreviewChannelId(
-                                    column.channel.id,
-                                  );
-                                }
-                              }}
-                            />
-                          ))}
-                        </View>
-                      ))}
-                    </View>
-                  </ScrollView>
-                </View>
-              </ScrollView>
-              <TimeRuler
-                scrollRef={timeRightRef}
-                marks={marks}
-                hourHeight={hourHeight}
-                viewportHeight={programViewport}
-                language={language}
-              />
-            </>
+            <GuideGrid
+              columns={renderedLaidOut}
+              columnCount={laidOut.length}
+              columnWidth={columnWidth}
+              trackWidth={trackWidth}
+              programViewport={programViewport}
+              gridContentHeight={gridContentHeight}
+              hourHeight={hourHeight}
+              marks={marks}
+              language={language}
+              now={now}
+              highlightedId={highlightedId}
+              preferredToken={preferredToken}
+              bodyRef={bodyRef}
+              timeLeftRef={timeLeftRef}
+              timeRightRef={timeRightRef}
+              horizontalRef={horizontalRef}
+              onScrollX={x => {
+                scrollX.current = x;
+                setViewportScrollX(x);
+              }}
+              onScrollY={y => {
+                scrollY.current = y;
+                setViewportScrollY(y);
+              }}
+              onProgramFocus={onProgramFocus}
+              onProgramPress={onProgramPress}
+              onAirId={onAir?.id ?? null}
+            />
           ) : null}
         </View>
       )}
@@ -1545,7 +1401,9 @@ export default function GuideScreen() {
             ]}
           >
             <Text style={styles.footerIcon}>Ｓ</Text>
-            <Text style={styles.footerLabel}>{copy(language).footerSubmenu}</Text>
+            <Text style={styles.footerLabel} numberOfLines={1}>
+              {copy(language).footerSubmenu}
+            </Text>
           </Pressable>
           <Pressable
             accessibilityLabel="Back"
@@ -1566,7 +1424,9 @@ export default function GuideScreen() {
             ]}
           >
             <Text style={styles.footerIcon}>○</Text>
-            <Text style={styles.footerLabel}>{copy(language).footerBack}</Text>
+            <Text style={styles.footerLabel} numberOfLines={1}>
+              {copy(language).footerBack}
+            </Text>
           </Pressable>
         </View>
         <View style={styles.footerGroup}>
@@ -1602,286 +1462,47 @@ export default function GuideScreen() {
           />
         </View>
       </View>
-      <Modal
+      <GuideSettingsModal
         visible={settingsVisible}
-        transparent
-        animationType="fade"
+        language={language}
+        focusCursorEnabled={focusCursorEnabled}
+        livePreviewEnabled={livePreviewEnabled}
+        url={url}
+        playlistUrl={playlistUrl}
+        loading={loading}
+        urlRef={urlRef}
         onRequestClose={() => setSettingsVisible(false)}
-      >
-        <View style={styles.modalRoot}>
-          <View style={styles.infoOverlay}>
-            <View style={styles.settingsDialog}>
-            <Text style={styles.settingsTitle}>{copy(language).settings}</Text>
-            <Pressable
-              accessibilityLabel={copy(language).focusCursor}
-              accessibilityRole="switch"
-              accessibilityState={{ checked: focusCursorEnabled }}
-              testID="focus-cursor-setting"
-              onPress={toggleFocusCursor}
-              style={({ focused: tvFocused }) => [
-                styles.focusCursorSetting,
-                tvFocused && styles.focusedControl,
-              ]}
-            >
-              <View style={styles.focusCursorSettingCopy}>
-                <Text style={styles.fieldLabel}>
-                  {copy(language).focusCursor}
-                </Text>
-                <Text style={styles.focusCursorHint}>
-                  {copy(language).focusCursorHint}
-                </Text>
-              </View>
-              <Text style={styles.focusCursorValue}>
-                {focusCursorEnabled ? 'ON' : 'OFF'}
-              </Text>
-            </Pressable>
-            <Pressable
-              accessibilityLabel={copy(language).livePreview}
-              accessibilityRole="switch"
-              accessibilityState={{ checked: livePreviewEnabled }}
-              testID="live-preview-setting"
-              onPress={toggleLivePreview}
-              style={({ focused: tvFocused }) => [
-                styles.focusCursorSetting,
-                tvFocused && styles.focusedControl,
-              ]}
-            >
-              <View style={styles.focusCursorSettingCopy}>
-                <Text style={styles.fieldLabel}>
-                  {copy(language).livePreview}
-                </Text>
-                <Text style={styles.focusCursorHint}>
-                  {copy(language).livePreviewHint}
-                </Text>
-              </View>
-              <Text style={styles.focusCursorValue}>
-                {livePreviewEnabled ? 'ON' : 'OFF'}
-              </Text>
-            </Pressable>
-            <Text style={styles.fieldLabel}>{copy(language).epgLabel}</Text>
-            <TextInput
-              ref={urlRef}
-              value={url}
-              onChangeText={value => {
-                urlDirty.current = true;
-                setUrl(value);
-              }}
-              onSubmitEditing={() => {
-                loadGuide().catch(() => undefined);
-              }}
-              placeholder="XMLTV URL"
-              placeholderTextColor="#8d8d8d"
-              autoCapitalize="none"
-              autoCorrect={false}
-              inputMode="url"
-              returnKeyType="go"
-              style={styles.settingsInput}
-            />
-            <Text style={styles.fieldLabel}>{copy(language).playlistLabel}</Text>
-            <TextInput
-              value={playlistUrl}
-              onChangeText={value => {
-                playlistDirty.current = true;
-                setPlaylistUrl(value);
-              }}
-              onSubmitEditing={() => {
-                loadGuide().catch(() => undefined);
-              }}
-              placeholder="M3U / M3U8"
-              placeholderTextColor="#8d8d8d"
-              autoCapitalize="none"
-              autoCorrect={false}
-              inputMode="url"
-              returnKeyType="go"
-              accessibilityLabel={copy(language).playlistAccessibility}
-              style={styles.settingsInput}
-            />
-            <View style={styles.settingsActions}>
-              <Pressable
-                accessibilityLabel={copy(language).languageControlAccessibility}
-                disabled={loading}
-                onPress={() => {
-                  toggleLanguage().catch(() => undefined);
-                }}
-                style={({ focused: tvFocused }) => [
-                  styles.languageButton,
-                  tvFocused && styles.focusedControl,
-                  loading && styles.disabled,
-                ]}
-              >
-                <Text style={styles.loadLabel}>
-                  {copy(language).languageControl}
-                </Text>
-              </Pressable>
-              <Pressable
-                accessibilityLabel={copy(language).loadAccessibility}
-                onPress={() => {
-                  loadGuide().catch(() => undefined);
-                }}
-                disabled={loading}
-                style={({ focused: tvFocused }) => [
-                  styles.loadButton,
-                  tvFocused && styles.focusedControl,
-                  loading && styles.disabled,
-                ]}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#ffffff" size="small" />
-                ) : (
-                  <Text style={styles.loadLabel}>{copy(language).load}</Text>
-                )}
-              </Pressable>
-              <Pressable
-                accessibilityLabel={copy(language).close}
-                hasTVPreferredFocus={settingsVisible}
-                onPress={() => {
-                  epgFocusEngagedRef.current = false;
-                  setTopControlsPreferred(false);
-                  setSettingsVisible(false);
-                  setPreferredToken(preferredId);
-                }}
-                style={({ focused: tvFocused }) => [
-                  styles.settingsCloseButton,
-                  tvFocused && styles.focusedControl,
-                ]}
-              >
-                <Text style={styles.infoCloseText}>{copy(language).close}</Text>
-              </Pressable>
-            </View>
-            </View>
-          </View>
-          {renderFocusCursor()}
-        </View>
-      </Modal>
-      <Modal
-        visible={infoProgram !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setInfoProgram(null)}
-      >
-        <View style={styles.modalRoot}>
-          <View style={styles.infoOverlay}>
-            <View style={styles.infoDialog}>
-            {infoProgram !== null ? (
-              <>
-                <Text style={styles.infoChannel}>
-                  {infoProgram.channelName}
-                </Text>
-                <Text style={styles.infoTitle}>
-                  {infoProgram.program.title}
-                </Text>
-                <Text style={styles.infoTime}>
-                  {formatBannerDate(infoProgram.program.startMs, language)}{' '}
-                  {formatClock(infoProgram.program.startMs)}～
-                  {formatClock(infoProgram.program.endMs)}
-                </Text>
-                <ScrollView style={styles.infoDescriptionScroll}>
-                  <Text style={styles.infoDescription}>
-                    {infoProgram.program.description}
-                  </Text>
-                </ScrollView>
-                <Pressable
-                  accessibilityLabel={copy(language).close}
-                  hasTVPreferredFocus={infoProgram !== null}
-                  onPress={() => setInfoProgram(null)}
-                  style={({ focused: tvFocused }) => [
-                    styles.infoCloseButton,
-                    tvFocused && styles.focusedControl,
-                  ]}
-                >
-                  <Text style={styles.infoCloseText}>
-                    {copy(language).close}
-                  </Text>
-                </Pressable>
-              </>
-            ) : null}
-            </View>
-          </View>
-          {renderFocusCursor()}
-        </View>
-      </Modal>
+        onClose={() => {
+          epgFocusEngagedRef.current = false;
+          setTopControlsPreferred(false);
+          setSettingsVisible(false);
+          setPreferredToken(preferredId);
+        }}
+        onToggleFocusCursor={toggleFocusCursor}
+        onToggleLivePreview={toggleLivePreview}
+        onUrlChange={value => {
+          urlDirty.current = true;
+          setUrl(value);
+        }}
+        onPlaylistUrlChange={value => {
+          playlistDirty.current = true;
+          setPlaylistUrl(value);
+        }}
+        onLoad={() => {
+          loadGuide().catch(() => undefined);
+        }}
+        onToggleLanguage={() => {
+          toggleLanguage().catch(() => undefined);
+        }}
+        renderFocusCursor={renderFocusCursor()}
+      />
+      <ProgramInfoModal
+        infoProgram={infoProgram}
+        language={language}
+        onClose={() => setInfoProgram(null)}
+        renderFocusCursor={renderFocusCursor()}
+      />
       {settingsVisible || infoProgram !== null ? null : renderFocusCursor()}
-    </View>
-  );
-}
-
-function TimeRuler({
-  scrollRef,
-  marks,
-  hourHeight,
-  viewportHeight,
-  language,
-}: {
-  scrollRef: React.RefObject<ScrollView | null>;
-  marks: ReturnType<typeof hourMarks>;
-  hourHeight: number;
-  viewportHeight: number;
-  language: UiLanguage;
-}) {
-  return (
-    <View pointerEvents="none" style={styles.timeColumn}>
-      <View style={{ height: CHANNEL_HEADER_HEIGHT }} />
-      <ScrollView
-        ref={scrollRef}
-        scrollEnabled={false}
-        showsVerticalScrollIndicator={false}
-        isTVSelectable={false}
-        style={{ height: viewportHeight }}
-      >
-        {marks.map(mark => (
-          <View
-            key={`${mark.dateLabel}-${mark.hour}`}
-            style={[styles.hour, { height: hourHeight }]}
-          >
-            <Text style={styles.hourNumber}>{mark.hour}</Text>
-            <Text style={styles.hourSuffix}>{copy(language).hourSuffix}</Text>
-          </View>
-        ))}
-      </ScrollView>
-    </View>
-  );
-}
-
-function ProgramBanner({
-  program,
-  language,
-}: {
-  program: GuideProgram | null;
-  language: UiLanguage;
-}) {
-  return (
-    <View style={styles.banner}>
-      <View style={styles.bannerCard}>
-        {program === null ? (
-          <Text style={styles.bannerDate}>{copy(language).noProgramme}</Text>
-        ) : (
-          <>
-            <Text style={styles.bannerDate}>
-              {formatBannerDate(program.startMs, language)}
-            </Text>
-            <Text style={styles.bannerTime}>
-              {formatClock(program.startMs)}～{formatClock(program.endMs)}
-            </Text>
-          </>
-        )}
-      </View>
-      <View style={styles.bannerCopy}>
-        <Text
-          style={styles.bannerTitle}
-          numberOfLines={program?.description ? 1 : 2}
-        >
-          {program === null ? copy(language).selectProgramme : program.title}
-        </Text>
-        {program !== null && program.description !== '' ? (
-          <Text style={styles.bannerDescription} numberOfLines={1}>
-            {program.description}
-          </Text>
-        ) : null}
-      </View>
-      <View style={styles.logoBadge}>
-        <Text style={styles.logoG}>G</Text>
-        <Text style={styles.logoWord}>GUIDE</Text>
-      </View>
     </View>
   );
 }
@@ -1911,108 +1532,17 @@ function ColorKey({
       ]}
     >
       <View style={[styles.keyDot, { backgroundColor: color }]} />
-      <Text style={styles.footerLabel}>{label}</Text>
+      <Text style={styles.footerLabel} numberOfLines={1}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
-
-const ProgramCell = React.memo(function ProgramCell({
-  item,
-  now,
-  highlighted,
-  onAir,
-  preferred,
-  onFocus,
-  onPress,
-}: {
-  item: LaidProgram;
-  now: number;
-  highlighted: boolean;
-  onAir: boolean;
-  preferred: boolean;
-  onFocus: () => void;
-  onPress: () => void;
-}) {
-  const past = item.program.endMs <= now;
-  const shopping =
-    item.program.genre.includes('ショッピング') ||
-    item.program.genre.includes('通販') ||
-    /shop/i.test(item.program.genre);
-  const base = genreColors(item.program.genre);
-  let background = mixHex(base.background, base.highlight, 0.84);
-  const tint =
-    past && shopping
-      ? '#b7b7b7'
-      : past
-      ? '#c4c4c4'
-      : shopping
-      ? '#cfcfcf'
-      : null;
-  const weight = past && shopping ? 0.45 : past ? 0.6 : shopping ? 0.45 : 1;
-  if (tint !== null) {
-    background = mixHex(background, tint, weight);
-  }
-  if (highlighted) {
-    background = chrome.focus;
-  }
-  const minute = String(jstParts(item.program.startMs).minute).padStart(2, '0');
-  const titleLines = item.height >= 70 ? 2 : 1;
-  const showDescription = item.height >= 88 && item.program.description !== '';
-
-  return (
-    <Pressable
-      accessibilityLabel={`${item.program.title}, ${formatClock(
-        item.program.startMs,
-      )} to ${formatClock(item.program.endMs)}`}
-      hasTVPreferredFocus={preferred}
-      onFocus={onFocus}
-      onPress={onPress}
-      style={({ focused: tvFocused }) => [
-        styles.cell,
-        highlighted || tvFocused ? styles.cellHighlighted : null,
-        {
-          top: item.top,
-          height: Math.max(item.height, 1),
-          backgroundColor: background,
-        },
-      ]}
-    >
-      {onAir && !highlighted ? <View style={styles.onAirBar} /> : null}
-      <Text
-        style={[styles.cellMinute, past && !highlighted && styles.cellPast]}
-      >
-        {minute}
-      </Text>
-      <View style={styles.cellBody}>
-        <Text
-          style={[styles.cellTitle, past && !highlighted && styles.cellPast]}
-          numberOfLines={titleLines}
-        >
-          {item.program.title}
-        </Text>
-        {showDescription ? (
-          <Text
-            style={[
-              styles.cellDescription,
-              past && !highlighted && styles.cellPast,
-            ]}
-            numberOfLines={Math.max(1, Math.floor((item.height - 52) / 13))}
-          >
-            {item.program.description}
-          </Text>
-        ) : null}
-      </View>
-    </Pressable>
-  );
-});
 
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: chrome.screen,
-  },
-  modalRoot: {
-    flex: 1,
   },
   focusCursor: {
     position: 'absolute',
@@ -2028,7 +1558,7 @@ const styles = StyleSheet.create({
     fontSize: 56,
     lineHeight: 60,
     textShadowColor: '#168bff',
-    textShadowOffset: {width: 2, height: 2},
+    textShadowOffset: { width: 2, height: 2 },
     textShadowRadius: 3,
   },
   focusCursorCuff: {
@@ -2102,46 +1632,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: chrome.blue,
   },
-  urlRow: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginLeft: 8,
-  },
-  fieldLabel: {
-    color: chrome.muted,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  urlInput: {
-    flex: 1,
-    minWidth: 80,
-    height: 26,
-    paddingHorizontal: 8,
-    paddingVertical: 0,
-    borderRadius: 2,
-    backgroundColor: chrome.field,
-    color: '#ffffff',
-    fontSize: 12,
-  },
-  languageButton: {
-    height: 26,
-    minWidth: 48,
-    paddingHorizontal: 8,
-    borderRadius: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: chrome.blue,
-  },
-  loadButton: {
-    height: 26,
-    paddingHorizontal: 10,
-    borderRadius: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: chrome.green,
-  },
   loadLabel: {
     color: '#ffffff',
     fontSize: 12,
@@ -2174,7 +1664,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   dateRow: {
-    minHeight: 30,
+    minHeight: 34,
     paddingHorizontal: 8,
     flexDirection: 'row',
     alignItems: 'center',
@@ -2214,6 +1704,7 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   dayTab: {
+    flexShrink: 0,
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 2,
@@ -2223,8 +1714,9 @@ const styles = StyleSheet.create({
   },
   dayTabText: {
     color: chrome.tabText,
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '700',
+    lineHeight: 18,
   },
   dayTabTextSelected: {
     color: chrome.tabSelectedText,
@@ -2237,64 +1729,6 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
-  },
-  banner: {
-    flex: 1,
-    minHeight: 44,
-    paddingRight: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  bannerCard: {
-    minWidth: 118,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    backgroundColor: chrome.bannerCard,
-    alignItems: 'center',
-  },
-  bannerDate: {
-    color: chrome.bannerCardText,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  bannerTime: {
-    color: chrome.bannerCardText,
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  bannerCopy: {
-    flex: 1,
-  },
-  bannerTitle: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  bannerDescription: {
-    color: chrome.bannerBody,
-    fontSize: 12,
-    marginTop: 1,
-  },
-  logoBadge: {
-    width: 52,
-    height: 36,
-    borderWidth: 1,
-    borderColor: chrome.logo,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoG: {
-    color: chrome.logo,
-    fontSize: 14,
-    fontWeight: '800',
-    lineHeight: 16,
-  },
-  logoWord: {
-    color: chrome.logo,
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.5,
   },
   empty: {
     flex: 1,
@@ -2317,169 +1751,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: chrome.grid,
   },
-  track: {
-    flex: 1,
-  },
-  timeColumn: {
-    width: TIME_SCALE_WIDTH,
-    backgroundColor: '#000000',
-  },
-  hour: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'center',
-    paddingTop: 1,
-  },
-  hourNumber: {
-    width: 22,
-    textAlign: 'right',
-    color: '#ffffff',
-    fontSize: 20,
-    fontWeight: '700',
-    lineHeight: 22,
-    fontVariant: ['tabular-nums'],
-  },
-  hourSuffix: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 7,
-    marginLeft: 1,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    backgroundColor: chrome.channelHeader,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  channelHeader: {
-    height: CHANNEL_HEADER_HEIGHT,
-    justifyContent: 'center',
-    paddingHorizontal: 4,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: '#3a3a3a',
-  },
-  channelIdentity: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  badge: {
-    minWidth: 16,
-    height: 16,
-    paddingHorizontal: 2,
-    borderRadius: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badgeText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '800',
-    lineHeight: 13,
-  },
-  serviceNumber: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  channelName: {
-    color: '#f3f3f3',
-    fontSize: 11,
-    marginTop: 1,
-  },
-  canvas: {
-    backgroundColor: chrome.grid,
-  },
-  hourRule: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-  },
-  hourRuleMajor: {
-    height: 1,
-    backgroundColor: chrome.hourLine,
-  },
-  hourRuleMinor: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: chrome.halfHourLine,
-  },
-  column: {
-    position: 'absolute',
-    top: 0,
-    overflow: 'hidden',
-    borderRightWidth: 1,
-    borderRightColor: '#4a4a4a',
-  },
-  cell: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    overflow: 'hidden',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#2a2a2a',
-    paddingRight: 2,
-  },
-  cellHighlighted: {
-    borderWidth: 2,
-    borderColor: '#1a1a1a',
-    zIndex: 4,
-  },
-  onAirBar: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 3,
-    backgroundColor: chrome.onAir,
-  },
-  cellMinute: {
-    width: 22,
-    paddingTop: 1,
-    textAlign: 'center',
-    color: '#111111',
-    fontSize: 12,
-    fontWeight: '800',
-    lineHeight: 15,
-    includeFontPadding: false,
-  },
-  cellBody: {
-    flex: 1,
-    paddingTop: 1,
-  },
-  cellTitle: {
-    color: '#111111',
-    fontSize: 12,
-    fontWeight: '700',
-    lineHeight: 15,
-    includeFontPadding: false,
-  },
-  cellDescription: {
-    color: '#333333',
-    fontSize: 11,
-    lineHeight: 13,
-    includeFontPadding: false,
-  },
-  cellPast: {
-    color: '#555555',
-  },
   footer: {
-    minHeight: 32,
+    minHeight: 36,
     paddingHorizontal: 10,
     paddingTop: 4,
     backgroundColor: '#000000',
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 8,
   },
   footerGroup: {
     flexDirection: 'row',
+    flexShrink: 0,
     alignItems: 'center',
     gap: 10,
   },
   footerButton: {
+    flexShrink: 0,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
@@ -2495,6 +1785,8 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 12,
     fontWeight: '700',
+    lineHeight: 18,
+    flexShrink: 0,
   },
   keyDot: {
     width: 12,
@@ -2507,131 +1799,5 @@ const styles = StyleSheet.create({
   },
   disabled: {
     opacity: 0.35,
-  },
-  infoOverlay: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 32,
-    backgroundColor: 'rgba(0, 0, 0, 0.72)',
-  },
-  infoDialog: {
-    width: '100%',
-    maxWidth: 760,
-    maxHeight: '90%',
-    padding: 24,
-    backgroundColor: '#222222',
-    borderWidth: 1,
-    borderColor: '#777777',
-  },
-  settingsDialog: {
-    width: '100%',
-    maxWidth: 640,
-    padding: 24,
-    backgroundColor: '#222222',
-    borderWidth: 1,
-    borderColor: '#777777',
-  },
-  settingsTitle: {
-    color: '#ffffff',
-    fontSize: 24,
-    fontWeight: '800',
-    marginBottom: 16,
-  },
-  focusCursorSetting: {
-    minHeight: 56,
-    marginBottom: 14,
-    paddingHorizontal: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: '#777777',
-    backgroundColor: chrome.field,
-  },
-  focusCursorSettingCopy: {
-    flex: 1,
-    paddingVertical: 8,
-  },
-  focusCursorHint: {
-    color: chrome.muted,
-    fontSize: 12,
-    marginTop: 3,
-  },
-  focusCursorValue: {
-    minWidth: 54,
-    marginLeft: 12,
-    paddingVertical: 6,
-    textAlign: 'center',
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '800',
-    backgroundColor: chrome.blue,
-  },
-  settingsInput: {
-    width: '100%',
-    height: 42,
-    marginTop: 6,
-    marginBottom: 14,
-    paddingHorizontal: 12,
-    borderRadius: 2,
-    backgroundColor: chrome.field,
-    color: '#ffffff',
-    fontSize: 16,
-  },
-  settingsActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    gap: 8,
-  },
-  settingsCloseButton: {
-    minWidth: 96,
-    height: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 2,
-    backgroundColor: '#555555',
-  },
-  infoChannel: {
-    color: chrome.muted,
-    fontSize: 14,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  infoTitle: {
-    color: '#ffffff',
-    fontSize: 24,
-    lineHeight: 32,
-    fontWeight: '800',
-  },
-  infoTime: {
-    color: chrome.bannerBody,
-    fontSize: 16,
-    marginTop: 10,
-    marginBottom: 16,
-  },
-  infoDescriptionScroll: {
-    flexGrow: 0,
-    maxHeight: 320,
-  },
-  infoDescription: {
-    color: '#ffffff',
-    fontSize: 17,
-    lineHeight: 25,
-  },
-  infoCloseButton: {
-    alignSelf: 'flex-end',
-    minWidth: 96,
-    alignItems: 'center',
-    marginTop: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    backgroundColor: chrome.blue,
-  },
-  infoCloseText: {
-    color: '#ffffff',
-    fontSize: 15,
-    fontWeight: '700',
   },
 });
