@@ -30,6 +30,9 @@ export function copy(language: UiLanguage) {
     emptyBody: english
       ? 'An XMLTV file with KonomiTV channel ids fills the grid. The EPG address is kept for the next launch. The M3U / M3U8 playlist matches TVirl channels in Live Channels and is not played by this app.'
       : 'KonomiTV と同じチャンネル ID の XMLTV を読み込むと、時間は左右、放送局は横、番組は縦に並びます。指定した EPG は次回の起動でも使われます。M3U / M3U8 はこのアプリでは再生せず、Live Channels の TVirl チャンネルとの照合に使います。',
+    loadingBody: english
+      ? 'Loading the program guide.'
+      : '番組表を読み込んでいます。',
     livePermissionMissing: english
       ? 'Allow Live Channels listings to show a preview'
       : 'プレビューを見るには Live Channels の番組一覧権限を許可してください',

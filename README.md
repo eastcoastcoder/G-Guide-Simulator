@@ -39,9 +39,10 @@ You can also build it from Android Studio.
 The Android text renderer uses a locally supplied `MS-Gothic.ttc` face with its embedded 1-bit
 bitmap strikes. Place the licensed TTC at
 `android/app/src/main/assets/fonts/MS-Gothic.ttc`; it is intentionally excluded from source
-control. Android's embedded-bitmap text flag is enabled and antialiasing is disabled, while the
-React Native layout, focus, and accessibility tree remain unchanged. The separate live preview and
-modal windows are not affected by the activity's text view configuration.
+control. The face is registered as `MSGothic` in `MainApplication`, and `GuideText` sets that
+family so React Native measures and draws the same face. The postinstall script applies the
+embedded-bitmap paint flags in the React Native text measure and draw path. The separate live
+preview and modal windows are not affected by an activity wrapper.
 
 ## Step 3: Modify your app
 

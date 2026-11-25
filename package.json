@@ -5,6 +5,7 @@
   "scripts": {
     "android": "react-native run-android",
     "lint": "eslint .",
+    "postinstall": "node scripts/apply-bitmap-font-measure.mjs",
     "start": "react-native start",
     "test": "jest"
   },

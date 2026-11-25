@@ -5,7 +5,7 @@ export default function GuideText({style, ...props}: TextProps) {
   return (
     <NativeText
       {...props}
-      style={[style, {fontWeight: 'normal'}]}
+      style={[style, {fontWeight: 'normal', fontFamily: 'MSGothic'}]}
     />
   );
 }

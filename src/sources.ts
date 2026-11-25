@@ -17,6 +17,12 @@ export const SOURCES_STORAGE_KEY = 'g-guide.sources';
 export const FOCUS_CURSOR_STORAGE_KEY = 'g-guide.focus-cursor';
 export const LIVE_PREVIEW_STORAGE_KEY = 'g-guide.live-preview';
 export const GUIDE_STORAGE: AsyncStorage = createAsyncStorage('g-guide');
+export const CACHED_GUIDE_STORAGE_KEY = 'g-guide.cached-guide';
+
+export interface CachedGuide {
+  epgUrl: string;
+  xml: string;
+}
 
 export const EMPTY_SOURCES: GuideSources = {
   epgUrl: '',
@@ -92,6 +98,46 @@ export async function loadLivePreviewEnabled(): Promise<boolean> {
 
 export async function saveLivePreviewEnabled(enabled: boolean): Promise<void> {
   await GUIDE_STORAGE.setItem(LIVE_PREVIEW_STORAGE_KEY, String(enabled));
+}
+
+export async function loadCachedGuide(
+  epgUrl: string,
+): Promise<CachedGuide | null> {
+  try {
+    const raw = await GUIDE_STORAGE.getItem(CACHED_GUIDE_STORAGE_KEY);
+    if (raw === null || raw.trim() === '') {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) {
+      return null;
+    }
+    const record = parsed as Record<string, unknown>;
+    if (
+      typeof record.epgUrl !== 'string' ||
+      typeof record.xml !== 'string' ||
+      record.xml.trim() === ''
+    ) {
+      return null;
+    }
+    const cachedUrl = record.epgUrl.trim();
+    if (cachedUrl !== epgUrl.trim()) {
+      return null;
+    }
+    return {epgUrl: cachedUrl, xml: record.xml};
+  } catch {
+    return null;
+  }
+}
+
+export async function saveCachedGuide(
+  epgUrl: string,
+  xml: string,
+): Promise<void> {
+  await GUIDE_STORAGE.setItem(
+    CACHED_GUIDE_STORAGE_KEY,
+    JSON.stringify({epgUrl: epgUrl.trim(), xml}),
+  );
 }
 
 function playlistPath(value: string): string {
